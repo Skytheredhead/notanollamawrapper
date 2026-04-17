@@ -1,0 +1,19 @@
+{
+  "name": "notanollamawrapper",
+  "version": "0.1.0",
+  "description": "Backend-only local HTTP API for naow chat over Ollama.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "latest",
+    "fastify": "latest"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
