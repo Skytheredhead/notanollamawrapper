@@ -32,7 +32,9 @@ button, input, textarea, select { font: inherit; }
   display: grid;
   grid-template-rows: auto 1fr auto;
   background:
-    linear-gradient(120deg, rgba(255,255,255,0.72), rgba(255,255,255,0.28)),
+    radial-gradient(circle at 30% 18%, rgba(229, 238, 249, 0.72), transparent 30%),
+    radial-gradient(circle at 78% 22%, rgba(246, 232, 217, 0.58), transparent 32%),
+    linear-gradient(145deg, rgba(255,255,255,0.8), rgba(240,242,239,0.44)),
     var(--bg);
   color: var(--ink);
   transition: background 420ms ease, color 240ms ease;
@@ -45,7 +47,7 @@ button, input, textarea, select { font: inherit; }
   top: 0;
   bottom: 0;
   width: min(24vw, 420px);
-  z-index: 14;
+  z-index: 10;
   pointer-events: none;
 }
 
@@ -61,13 +63,21 @@ button, input, textarea, select { font: inherit; }
 
 .topBar {
   height: 64px;
-  display: grid;
-  grid-template-columns: auto minmax(220px, 520px) auto;
+  display: flex;
   gap: 14px;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 22px;
   position: relative;
   z-index: 20;
+}
+
+.leftCluster {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  flex: 1;
 }
 
 .brandButton,
@@ -103,7 +113,7 @@ button, input, textarea, select { font: inherit; }
 
 .searchWrap {
   position: relative;
-  width: 100%;
+  width: min(460px, 42vw);
 }
 
 .searchInput {
@@ -179,11 +189,17 @@ button, input, textarea, select { font: inherit; }
   top: calc(100% + 10px);
   width: 270px;
   padding: 14px;
-  background: var(--surface-strong);
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+  backdrop-filter: blur(22px) saturate(1.08);
   animation: pop 180ms ease both;
+  transform-origin: 92% 0;
+}
+
+.settingsPanel.isClosing {
+  animation: foldAway 180ms ease both;
 }
 
 .settingsTitle {
@@ -191,7 +207,7 @@ button, input, textarea, select { font: inherit; }
   margin-bottom: 10px;
 }
 
-.settingsPanel label {
+.settingsField {
   display: grid;
   gap: 6px;
   margin-bottom: 12px;
@@ -199,24 +215,118 @@ button, input, textarea, select { font: inherit; }
   font-size: 13px;
 }
 
+.selectShell {
+  position: relative;
+  display: block;
+}
+
+.selectShell::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-62%) rotate(45deg);
+  pointer-events: none;
+  transition: transform 180ms ease, border-color 180ms ease;
+}
+
+.selectShell:focus-within::after {
+  transform: translateY(-38%) rotate(225deg);
+  border-color: var(--accent);
+}
+
 .settingsPanel select {
+  appearance: none;
+  -webkit-appearance: none;
   width: 100%;
   border: 1px solid var(--line);
-  background: var(--bg);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-strong) 96%, transparent), color-mix(in srgb, var(--surface) 76%, transparent));
   color: var(--ink);
   border-radius: var(--radius);
-  padding: 8px 9px;
+  padding: 9px 34px 9px 10px;
+  outline: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.42);
+  transition: transform 170ms ease, border-color 170ms ease, box-shadow 170ms ease, background 220ms ease;
+}
+
+.settingsPanel select:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+}
+
+.settingsPanel select:focus {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .checkRow {
+  display: grid;
   grid-template-columns: auto 1fr;
+  gap: 9px;
   align-items: center;
+  color: var(--ink);
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+
+.checkRow input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.customCheck {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-strong) 96%, transparent), color-mix(in srgb, var(--surface) 76%, transparent));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.44);
+  transition: transform 170ms ease, background 170ms ease, border-color 170ms ease, box-shadow 170ms ease;
+  position: relative;
+}
+
+.customCheck::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 4px;
+  width: 7px;
+  height: 12px;
+  border-right: 2px solid var(--accent-ink);
+  border-bottom: 2px solid var(--accent-ink);
+  opacity: 0;
+  transform: rotate(42deg) scale(0.6);
+  transition: opacity 140ms ease, transform 180ms cubic-bezier(.18,.92,.18,1);
+}
+
+.checkRow:hover .customCheck {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.checkRow input:checked + .customCheck {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 10px 20px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.checkRow input:checked + .customCheck::after {
+  opacity: 1;
+  transform: rotate(42deg) scale(1);
 }
 
 .stage {
   min-height: 0;
   position: relative;
   perspective: 1300px;
+  z-index: 12;
 }
 
 .carousel {
@@ -234,6 +344,10 @@ button, input, textarea, select { font: inherit; }
   transition: transform 560ms cubic-bezier(.18,.92,.18,1), opacity 280ms ease;
   transform-style: preserve-3d;
   will-change: transform;
+}
+
+.carousel.isDragging .carouselSlide {
+  transition-duration: 0ms;
 }
 
 .chatCard {
@@ -333,26 +447,46 @@ button, input, textarea, select { font: inherit; }
 
 .newThreadButton {
   position: absolute;
-  right: clamp(42px, 12vw, 240px);
+  right: clamp(14px, 3vw, 72px);
   top: 50%;
-  z-index: 16;
-  width: 54px;
-  height: 54px;
+  z-index: 26;
+  width: 58px;
+  height: 58px;
   border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  background: color-mix(in srgb, var(--surface-strong) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+  background:
+    radial-gradient(circle at 34% 24%, rgba(255,255,255,0.9), transparent 42%),
+    color-mix(in srgb, var(--surface-strong) 94%, transparent);
   color: var(--accent);
-  box-shadow: 0 16px 50px rgba(30, 30, 30, 0.1);
-  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 54px rgba(30, 30, 30, 0.18), 0 0 0 6px color-mix(in srgb, var(--surface-strong) 38%, transparent), inset 0 1px 0 rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px) saturate(1.14);
   display: grid;
   place-items: center;
   cursor: pointer;
 }
 
 .newThreadButton span {
-  font-size: 28px;
-  line-height: 1;
-  transform: translateY(-1px);
+  width: 18px;
+  height: 18px;
+  position: relative;
+  font-size: 0;
+}
+
+.newThreadButton span::before,
+.newThreadButton span::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.newThreadButton span::after {
+  transform: translate(-50%, -50%) rotate(90deg);
 }
 
 .newThreadButton:hover {
@@ -499,6 +633,24 @@ pre {
   background: rgba(9, 15, 13, 0.58);
 }
 
+.color-dark {
+  --bg: #101113;
+  --surface: rgba(28, 29, 32, 0.78);
+  --surface-strong: #202226;
+  --ink: #f2f0eb;
+  --muted: #aaa39a;
+  --line: rgba(255, 255, 255, 0.13);
+  --accent: #f4f1eb;
+  --accent-ink: #111111;
+  --shadow: 0 28px 88px rgba(0, 0, 0, 0.36);
+  --edge-fade: #101113;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(76, 92, 119, 0.36), transparent 32%),
+    radial-gradient(circle at 78% 22%, rgba(97, 72, 55, 0.28), transparent 34%),
+    linear-gradient(145deg, rgba(20,21,24,0.96), rgba(12,13,15,0.98)),
+    var(--bg);
+}
+
 @keyframes rise {
   from { opacity: 0; transform: translateY(8px) scale(0.99); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -507,6 +659,11 @@ pre {
 @keyframes pop {
   from { opacity: 0; transform: translateY(-4px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes foldAway {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-4px) scale(0.97); }
 }
 
 @media (max-width: 720px) {

@@ -11,6 +11,12 @@ const THEMES = [
   ['terminal', 'Terminal'],
 ]
 
+const COLOR_MODES = [
+  ['system', 'System'],
+  ['light', 'Light'],
+  ['dark', 'Dark'],
+]
+
 function orderChats(chats) {
   return [...chats].sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0))
 }
@@ -108,33 +114,72 @@ function SearchBox({ chats, onSelect }) {
   )
 }
 
+function SelectControl({ label, value, onChange, options }) {
+  return (
+    <label className="settingsField">
+      <span>{label}</span>
+      <span className="selectShell">
+        <select value={value} onChange={onChange}>
+          {options.map(([optionValue, labelText]) => <option key={optionValue} value={optionValue}>{labelText}</option>)}
+        </select>
+      </span>
+    </label>
+  )
+}
+
 function Settings({ models, selectedModel, setSelectedModel }) {
   const [open, setOpen] = useState(false)
+  const [renderPanel, setRenderPanel] = useState(false)
+  const [closing, setClosing] = useState(false)
+  const wrapRef = useRef(null)
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
+  const colorMode = useStore((s) => s.colorMode)
+  const setColorMode = useStore((s) => s.setColorMode)
   const showMetrics = useStore((s) => s.showMetrics)
   const setShowMetrics = useStore((s) => s.setShowMetrics)
+  const modelOptions = models.map((model) => [model, model])
+
+  useEffect(() => {
+    if (open) {
+      setRenderPanel(true)
+      requestAnimationFrame(() => setClosing(false))
+      return
+    }
+    if (!renderPanel) return
+    setClosing(true)
+    const timeout = setTimeout(() => setRenderPanel(false), 180)
+    return () => clearTimeout(timeout)
+  }, [open, renderPanel])
+
+  useEffect(() => {
+    if (!open) return
+    const closeIfOutside = (event) => {
+      if (!wrapRef.current?.contains(event.target)) setOpen(false)
+    }
+    const closeOnTypingOutside = (event) => {
+      if (!wrapRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeIfOutside, true)
+    document.addEventListener('keydown', closeOnTypingOutside, true)
+    return () => {
+      document.removeEventListener('pointerdown', closeIfOutside, true)
+      document.removeEventListener('keydown', closeOnTypingOutside, true)
+    }
+  }, [open])
 
   return (
-    <div className="settingsWrap">
+    <div className="settingsWrap" ref={wrapRef}>
       <button className="iconButton" onClick={() => setOpen((v) => !v)} aria-label="Settings">Settings</button>
-      {open && (
-        <section className="settingsPanel">
+      {renderPanel && (
+        <section className={`settingsPanel ${closing ? 'isClosing' : ''}`}>
           <div className="settingsTitle">Settings</div>
-          <label>
-            <span>Theme</span>
-            <select value={theme} onChange={(e) => setTheme(e.target.value)}>
-              {THEMES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Model</span>
-            <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-              {models.map((model) => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </label>
+          <SelectControl label="Theme" value={theme} onChange={(e) => setTheme(e.target.value)} options={THEMES} />
+          <SelectControl label="Appearance" value={colorMode} onChange={(e) => setColorMode(e.target.value)} options={COLOR_MODES} />
+          <SelectControl label="Model" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} options={modelOptions} />
           <label className="checkRow">
             <input type="checkbox" checked={showMetrics} onChange={(e) => setShowMetrics(e.target.checked)} />
+            <span className="customCheck" aria-hidden="true" />
             <span>Show token timing</span>
           </label>
         </section>
@@ -180,6 +225,7 @@ function ChatCard({ active, messages, streamingContent, streamMetrics, isStreami
 
 export default function App() {
   const theme = useStore((s) => s.theme)
+  const colorMode = useStore((s) => s.colorMode)
   const {
     models, selectedModel, setSelectedModel,
     chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics,
@@ -187,8 +233,11 @@ export default function App() {
   } = useChat()
   const messagesByChat = useStore((s) => s.messagesByChat)
   const [drag, setDrag] = useState({ active: false, startX: 0, dx: 0 })
+  const [wheelDrag, setWheelDrag] = useState({ active: false, dx: 0 })
   const [now, setNow] = useState(() => performance.now())
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false)
   const inputRef = useRef(null)
+  const wheelSettleRef = useRef(null)
 
   useEffect(() => {
     loadModels()
@@ -206,6 +255,16 @@ export default function App() {
   }, [isStreaming])
 
   useEffect(() => { inputRef.current?.focus() }, [currentChatId])
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!media) return
+    const onChange = (event) => setSystemDark(event.matches)
+    media.addEventListener?.('change', onChange)
+    return () => media.removeEventListener?.('change', onChange)
+  }, [])
+
+  useEffect(() => () => window.clearTimeout(wheelSettleRef.current), [])
 
   const orderedChats = useMemo(() => orderChats(chats), [chats])
   const currentIndex = Math.max(0, orderedChats.findIndex((chat) => chat.id === currentChatId))
@@ -240,38 +299,82 @@ export default function App() {
   }
 
   const endDrag = () => {
-    const threshold = 72
+    const threshold = Math.min(180, Math.max(86, window.innerWidth * 0.16))
     if (drag.dx > threshold) moveTo(currentIndex - 1)
     if (drag.dx < -threshold) moveTo(currentIndex + 1)
     setDrag({ active: false, startX: 0, dx: 0 })
   }
 
+  const settleWheel = (dx) => {
+    const threshold = Math.min(180, Math.max(92, window.innerWidth * 0.16))
+    if (dx > threshold) moveTo(currentIndex - 1)
+    if (dx < -threshold) moveTo(currentIndex + 1)
+    setWheelDrag({ active: false, dx: 0 })
+  }
+
+  const handleWheel = (event) => {
+    if (Math.abs(event.deltaX) < Math.abs(event.deltaY) || Math.abs(event.deltaX) < 4) return
+    event.preventDefault()
+
+    setWheelDrag((previous) => {
+      const maxPull = Math.min(360, Math.max(180, window.innerWidth * 0.34))
+      let nextDx = previous.dx - event.deltaX * 1.25
+      const atStart = currentIndex === 0 && nextDx > 0
+      const atEnd = currentIndex === orderedChats.length - 1 && nextDx < 0
+      if (atStart || atEnd) nextDx = previous.dx - event.deltaX * 0.32
+      nextDx = Math.max(-maxPull, Math.min(maxPull, nextDx))
+
+      window.clearTimeout(wheelSettleRef.current)
+      wheelSettleRef.current = window.setTimeout(() => settleWheel(nextDx), 150)
+      return { active: true, dx: nextDx }
+    })
+  }
+
+  const resolvedColorMode = colorMode === 'system' ? (systemDark ? 'dark' : 'light') : colorMode
+
   return (
-    <div className={`app theme-${theme}`}>
+    <div className={`app theme-${theme} color-${resolvedColorMode}`}>
       <header className="topBar">
-        <div className="brandButton">naow</div>
-        <SearchBox chats={orderedChats} onSelect={selectChat} />
+        <div className="leftCluster">
+          <div className="brandButton">naow</div>
+          <SearchBox chats={orderedChats} onSelect={selectChat} />
+        </div>
         <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} />
       </header>
 
       <main className="stage">
         <div
-          className="carousel"
-          onPointerDown={(e) => setDrag({ active: true, startX: e.clientX, dx: 0 })}
-          onPointerMove={(e) => drag.active && setDrag((s) => ({ ...s, dx: e.clientX - s.startX }))}
+          className={`carousel ${drag.active || wheelDrag.active ? 'isDragging' : ''}`}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture?.(e.pointerId)
+            setDrag({ active: true, startX: e.clientX, dx: 0 })
+          }}
+          onPointerMove={(e) => {
+            if (!drag.active) return
+            const raw = e.clientX - drag.startX
+            const atStart = currentIndex === 0 && raw > 0
+            const atEnd = currentIndex === orderedChats.length - 1 && raw < 0
+            const resistance = atStart || atEnd ? 0.28 : 1
+            setDrag((s) => ({ ...s, dx: raw * resistance }))
+          }}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
+          onWheel={handleWheel}
         >
           {orderedChats.map((chat, index) => {
             const offset = index - currentIndex
-            const dx = offset * 84 + (drag.active ? drag.dx / 5 : 0)
-            const rotate = offset * 7 + (drag.active ? drag.dx / 80 : 0)
+            const interactionDx = drag.active ? drag.dx : wheelDrag.dx
+            const progress = interactionDx / Math.max(window.innerWidth * 0.62, 520)
+            const wheelOffset = offset + progress
+            const dragPx = interactionDx
+            const rotate = wheelOffset * 8
+            const scale = 1 - Math.min(Math.abs(wheelOffset) * 0.055, 0.11)
             return (
               <div
                 key={chat.id}
                 className="carouselSlide"
                 style={{
-                  transform: `translate3d(calc(${dx}% - ${offset * 20}px), 0, ${-Math.abs(offset) * 130}px) rotateY(${rotate}deg) scale(${index === currentIndex ? 1 : 0.94})`,
+                  transform: `translate3d(calc(${offset * 112}% - ${offset * 12}px + ${dragPx}px), 0, ${-Math.abs(wheelOffset) * 130}px) rotateY(${rotate}deg) scale(${scale})`,
                   opacity: Math.abs(offset) > 2 ? 0 : 1,
                   pointerEvents: index === currentIndex ? 'auto' : 'none',
                   zIndex: 10 - Math.abs(offset),

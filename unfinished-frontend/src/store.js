@@ -6,6 +6,8 @@ const useStore = create(
     (set) => ({
       theme: 'minimal',
       setTheme: (theme) => set({ theme }),
+      colorMode: 'system',
+      setColorMode: (colorMode) => set({ colorMode }),
       showMetrics: true,
       setShowMetrics: (showMetrics) => set({ showMetrics }),
 
@@ -77,7 +79,7 @@ const useStore = create(
     }),
     {
       name: 'naow-persist',
-      partialize: (s) => ({ theme: s.theme, selectedModel: s.selectedModel, showMetrics: s.showMetrics }),
+      partialize: (s) => ({ theme: s.theme, colorMode: s.colorMode, selectedModel: s.selectedModel, showMetrics: s.showMetrics }),
     }
   )
 )
