@@ -17,8 +17,26 @@ const COLOR_MODES = [
   ['dark', 'Dark'],
 ]
 
+const EMPTY_PROMPTS = [
+  ['Start clean.', 'One thought at a time.'],
+  ['What are we making?', 'Drop the first piece here.'],
+  ['Quiet thread.', 'Ask something small or strange.'],
+  ['Fresh page.', 'No context yet.'],
+  ['Ready when you are.', 'Start anywhere.'],
+]
+
 function orderChats(chats) {
-  return [...chats].sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0))
+  return [...chats].sort((a, b) => new Date(a.createdAt || a.updatedAt || 0) - new Date(b.createdAt || b.updatedAt || 0))
+}
+
+function promptForChat(chatId, name) {
+  const source = chatId || 'new'
+  const sum = [...source].reduce((total, char) => total + char.charCodeAt(0), 0)
+  const [title, subtitle] = EMPTY_PROMPTS[sum % EMPTY_PROMPTS.length]
+  if (!name) return { title, subtitle }
+  if (title === 'Ready when you are.') return { title: `Ready when you are, ${name}.`, subtitle }
+  if (title === 'What are we making?') return { title: `What are we making, ${name}?`, subtitle }
+  return { title, subtitle: `${subtitle} ${name ? `Your move, ${name}.` : ''}`.trim() }
 }
 
 function formatMetric(ms) {
@@ -127,6 +145,15 @@ function SelectControl({ label, value, onChange, options }) {
   )
 }
 
+function TextControl({ label, value, onChange, placeholder }) {
+  return (
+    <label className="settingsField">
+      <span>{label}</span>
+      <input className="settingsTextInput" value={value} onChange={onChange} placeholder={placeholder} />
+    </label>
+  )
+}
+
 function Settings({ models, selectedModel, setSelectedModel }) {
   const [open, setOpen] = useState(false)
   const [renderPanel, setRenderPanel] = useState(false)
@@ -136,6 +163,8 @@ function Settings({ models, selectedModel, setSelectedModel }) {
   const setTheme = useStore((s) => s.setTheme)
   const colorMode = useStore((s) => s.colorMode)
   const setColorMode = useStore((s) => s.setColorMode)
+  const userName = useStore((s) => s.userName)
+  const setUserName = useStore((s) => s.setUserName)
   const showMetrics = useStore((s) => s.showMetrics)
   const setShowMetrics = useStore((s) => s.setShowMetrics)
   const modelOptions = models.map((model) => [model, model])
@@ -176,6 +205,7 @@ function Settings({ models, selectedModel, setSelectedModel }) {
           <div className="settingsTitle">Settings</div>
           <SelectControl label="Theme" value={theme} onChange={(e) => setTheme(e.target.value)} options={THEMES} />
           <SelectControl label="Appearance" value={colorMode} onChange={(e) => setColorMode(e.target.value)} options={COLOR_MODES} />
+          <TextControl label="Name" value={userName} onChange={(e) => setUserName(e.target.value)} placeholder="Your name" />
           <SelectControl label="Model" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} options={modelOptions} />
           <label className="checkRow">
             <input type="checkbox" checked={showMetrics} onChange={(e) => setShowMetrics(e.target.checked)} />
@@ -188,8 +218,9 @@ function Settings({ models, selectedModel, setSelectedModel }) {
   )
 }
 
-function ChatCard({ active, messages, streamingContent, streamMetrics, isStreaming, now }) {
+function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, isStreaming, now, userName }) {
   const bottomRef = useRef(null)
+  const emptyPrompt = promptForChat(chatId, userName)
   useEffect(() => {
     if (active) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [active, messages.length, streamingContent])
@@ -199,13 +230,13 @@ function ChatCard({ active, messages, streamingContent, streamMetrics, isStreami
       <div className="messageList">
         {messages.length === 0 && !streamingContent && (
           <div className="emptyState">
-            <strong>Start clean.</strong>
-            <span>One thought at a time.</span>
+            <strong>{emptyPrompt.title}</strong>
+            <span>{emptyPrompt.subtitle}</span>
           </div>
         )}
         {messages.map((message) => (
           <section key={message.id} className={`message ${message.role}`}>
-            <div className="messageRole">{message.role === 'user' ? 'You' : 'naow'}</div>
+            <div className="messageRole">{message.role === 'user' ? (userName || 'You') : 'naow'}</div>
             <MessageContent content={message.content} />
             {message.role === 'assistant' && <MessageMetrics metrics={message.metrics} now={now} />}
           </section>
@@ -226,17 +257,21 @@ function ChatCard({ active, messages, streamingContent, streamMetrics, isStreami
 export default function App() {
   const theme = useStore((s) => s.theme)
   const colorMode = useStore((s) => s.colorMode)
+  const userName = useStore((s) => s.userName).trim()
   const {
     models, selectedModel, setSelectedModel,
-    chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics,
+    chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, queuedMessages,
     input, setInput, loadModels, loadChats, selectChat, newChat, sendMessage, stopGeneration, handleKeyDown,
   } = useChat()
   const messagesByChat = useStore((s) => s.messagesByChat)
   const [drag, setDrag] = useState({ active: false, startX: 0, dx: 0 })
-  const [wheelDrag, setWheelDrag] = useState({ active: false, dx: 0 })
+  const [wheelActive, setWheelActive] = useState(false)
+  const [visualIndex, setVisualIndex] = useState(0)
   const [now, setNow] = useState(() => performance.now())
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false)
   const inputRef = useRef(null)
+  const dragRef = useRef(drag)
+  const visualIndexRef = useRef(visualIndex)
   const wheelSettleRef = useRef(null)
 
   useEffect(() => {
@@ -269,10 +304,31 @@ export default function App() {
   const orderedChats = useMemo(() => orderChats(chats), [chats])
   const currentIndex = Math.max(0, orderedChats.findIndex((chat) => chat.id === currentChatId))
   const currentChat = orderedChats[currentIndex]
+  const maxIndex = Math.max(0, orderedChats.length - 1)
+
+  const setVisualPosition = (position) => {
+    visualIndexRef.current = position
+    setVisualIndex(position)
+  }
+
+  const setDragState = (next) => {
+    dragRef.current = next
+    setDrag(next)
+  }
+
+  useEffect(() => {
+    if (!drag.active && !wheelActive) setVisualPosition(currentIndex)
+  }, [currentIndex, drag.active, wheelActive])
 
   const moveTo = (index) => {
     const next = orderedChats[Math.max(0, Math.min(orderedChats.length - 1, index))]
     if (next && next.id !== currentChatId) selectChat(next.id)
+  }
+
+  const settleTo = (index) => {
+    const target = Math.max(0, Math.min(maxIndex, index))
+    setVisualPosition(target)
+    moveTo(target)
   }
 
   const openNewThread = () => {
@@ -299,44 +355,53 @@ export default function App() {
   }
 
   const endDrag = () => {
+    const lastDrag = dragRef.current
     const threshold = Math.min(180, Math.max(86, window.innerWidth * 0.16))
-    if (drag.dx > threshold) moveTo(currentIndex - 1)
-    if (drag.dx < -threshold) moveTo(currentIndex + 1)
-    setDrag({ active: false, startX: 0, dx: 0 })
+    let target = currentIndex
+    if (lastDrag.dx > threshold) target = currentIndex - 1
+    if (lastDrag.dx < -threshold) target = currentIndex + 1
+    setDragState({ active: false, startX: 0, dx: 0 })
+    settleTo(target)
   }
 
-  const settleWheel = (dx) => {
-    const threshold = Math.min(180, Math.max(92, window.innerWidth * 0.16))
-    if (dx > threshold) moveTo(currentIndex - 1)
-    if (dx < -threshold) moveTo(currentIndex + 1)
-    setWheelDrag({ active: false, dx: 0 })
+  const settleWheel = (position) => {
+    const target = Math.round(Math.max(0, Math.min(maxIndex, position)))
+    setWheelActive(false)
+    settleTo(target)
   }
 
   const handleWheel = (event) => {
     if (Math.abs(event.deltaX) < Math.abs(event.deltaY) || Math.abs(event.deltaX) < 4) return
     event.preventDefault()
 
-    setWheelDrag((previous) => {
-      const maxPull = Math.min(360, Math.max(180, window.innerWidth * 0.34))
-      let nextDx = previous.dx - event.deltaX * 1.25
-      const atStart = currentIndex === 0 && nextDx > 0
-      const atEnd = currentIndex === orderedChats.length - 1 && nextDx < 0
-      if (atStart || atEnd) nextDx = previous.dx - event.deltaX * 0.32
-      nextDx = Math.max(-maxPull, Math.min(maxPull, nextDx))
+    const currentVisual = visualIndexRef.current
+    const pageWidth = Math.max(window.innerWidth * 0.62, 520)
+    const edgeResistance =
+      (currentVisual <= 0 && event.deltaX < 0) || (currentVisual >= maxIndex && event.deltaX > 0)
+        ? 0.22
+        : 1
+    const nextPosition = Math.max(-0.16, Math.min(maxIndex + 0.16, currentVisual + (event.deltaX * edgeResistance) / pageWidth))
 
-      window.clearTimeout(wheelSettleRef.current)
-      wheelSettleRef.current = window.setTimeout(() => settleWheel(nextDx), 150)
-      return { active: true, dx: nextDx }
-    })
+    setWheelActive(true)
+    setVisualPosition(nextPosition)
+    window.clearTimeout(wheelSettleRef.current)
+    wheelSettleRef.current = window.setTimeout(() => settleWheel(visualIndexRef.current), 140)
   }
 
   const resolvedColorMode = colorMode === 'system' ? (systemDark ? 'dark' : 'light') : colorMode
+  const currentQueue = queuedMessages.filter((message) => message.chatId === currentChatId)
+  const actionLabel = isStreaming ? (input.trim() ? 'Queue' : 'Stop') : 'Send'
+  const handleComposerAction = () => {
+    if (isStreaming && !input.trim()) stopGeneration()
+    else sendMessage()
+  }
 
   return (
     <div className={`app theme-${theme} color-${resolvedColorMode}`}>
+      <div className="themeFade" aria-hidden="true" />
       <header className="topBar">
         <div className="leftCluster">
-          <div className="brandButton">naow</div>
+          <button className="brandButton" onClick={openNewThread}>naow</button>
           <SearchBox chats={orderedChats} onSelect={selectChat} />
         </div>
         <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} />
@@ -344,29 +409,28 @@ export default function App() {
 
       <main className="stage">
         <div
-          className={`carousel ${drag.active || wheelDrag.active ? 'isDragging' : ''}`}
+          className={`carousel ${drag.active || wheelActive ? 'isDragging' : ''}`}
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture?.(e.pointerId)
-            setDrag({ active: true, startX: e.clientX, dx: 0 })
+            setDragState({ active: true, startX: e.clientX, dx: 0 })
           }}
           onPointerMove={(e) => {
-            if (!drag.active) return
-            const raw = e.clientX - drag.startX
+            const lastDrag = dragRef.current
+            if (!lastDrag.active) return
+            const raw = e.clientX - lastDrag.startX
             const atStart = currentIndex === 0 && raw > 0
             const atEnd = currentIndex === orderedChats.length - 1 && raw < 0
             const resistance = atStart || atEnd ? 0.28 : 1
-            setDrag((s) => ({ ...s, dx: raw * resistance }))
+            const dx = raw * resistance
+            setDragState({ ...lastDrag, dx })
+            setVisualPosition(Math.max(-0.16, Math.min(maxIndex + 0.16, currentIndex - dx / Math.max(window.innerWidth * 0.62, 520))))
           }}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
           onWheel={handleWheel}
         >
           {orderedChats.map((chat, index) => {
-            const offset = index - currentIndex
-            const interactionDx = drag.active ? drag.dx : wheelDrag.dx
-            const progress = interactionDx / Math.max(window.innerWidth * 0.62, 520)
-            const wheelOffset = offset + progress
-            const dragPx = interactionDx
+            const wheelOffset = index - visualIndex
             const rotate = wheelOffset * 8
             const scale = 1 - Math.min(Math.abs(wheelOffset) * 0.055, 0.11)
             return (
@@ -374,19 +438,21 @@ export default function App() {
                 key={chat.id}
                 className="carouselSlide"
                 style={{
-                  transform: `translate3d(calc(${offset * 112}% - ${offset * 12}px + ${dragPx}px), 0, ${-Math.abs(wheelOffset) * 130}px) rotateY(${rotate}deg) scale(${scale})`,
-                  opacity: Math.abs(offset) > 2 ? 0 : 1,
-                  pointerEvents: index === currentIndex ? 'auto' : 'none',
-                  zIndex: 10 - Math.abs(offset),
+                  transform: `translate3d(calc(${wheelOffset * 112}% - ${wheelOffset * 12}px), 0, ${-Math.abs(wheelOffset) * 130}px) rotateY(${rotate}deg) scale(${scale})`,
+                  opacity: Math.abs(wheelOffset) > 2 ? 0 : 1,
+                  pointerEvents: Math.round(visualIndex) === index ? 'auto' : 'none',
+                  zIndex: 10 - Math.round(Math.abs(wheelOffset)),
                 }}
               >
                 <ChatCard
+                  chatId={chat.id}
                   active={index === currentIndex}
                   messages={chat.id === currentChatId ? messages : (messagesByChat[chat.id] || [])}
                   streamingContent={streamingContent}
                   streamMetrics={streamMetrics}
                   isStreaming={isStreaming}
                   now={now}
+                  userName={userName}
                 />
               </div>
             )
@@ -405,10 +471,21 @@ export default function App() {
       </main>
 
       <footer className="composer">
+        {currentQueue.length > 0 && (
+          <div className="queueShelf" aria-live="polite">
+            <span className="queueLabel">{currentQueue.length === 1 ? 'Queued next' : `${currentQueue.length} queued`}</span>
+            <div className="queueItems">
+              {currentQueue.slice(0, 3).map((message) => (
+                <div className="queueChip" key={message.id}>{message.content}</div>
+              ))}
+              {currentQueue.length > 3 && <div className="queueChip more">+{currentQueue.length - 3}</div>}
+            </div>
+          </div>
+        )}
         <div className="composerShell">
-          <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={isStreaming || !currentChat} placeholder="Message naow" rows={1} onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 138)}px` }} />
+          <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={!currentChat} placeholder={isStreaming ? 'Queue the next message' : (userName ? `Message naow, ${userName}` : 'Message naow')} rows={1} onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 138)}px` }} />
           <div className="composerActions">
-            <button className="sendButton" onClick={isStreaming ? stopGeneration : sendMessage}>{isStreaming ? 'Stop' : 'Send'}</button>
+            <button className="sendButton" onClick={handleComposerAction}>{actionLabel}</button>
           </div>
         </div>
       </footer>

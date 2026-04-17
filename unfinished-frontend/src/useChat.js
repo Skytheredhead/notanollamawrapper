@@ -13,6 +13,7 @@ export function useChat() {
     isStreaming, setIsStreaming,
     streamController, setStreamController,
     streamMetrics, startStreamMetrics, clearStreamMetrics,
+    queuedMessages, enqueueMessage, shiftQueuedMessage,
     input, setInput,
     setError,
   } = useStore()
@@ -58,28 +59,31 @@ export function useChat() {
     } catch (e) { setError(e.message) }
   }, [])
 
-  const sendMessage = useCallback(async () => {
-    const state = useStore.getState()
-    if (!state.input.trim() || state.isStreaming || !state.currentChatId) return
-    const content = state.input.trim()
-    setInput('')
-    appendMessage({ id: `u${Date.now()}`, chatId: state.currentChatId, role: 'user', content })
+  const startGeneration = useCallback((chatId, content, model) => {
+    if (!chatId || !content.trim()) return
+    appendMessage({ id: `u${Date.now()}`, chatId, role: 'user', content })
     setIsStreaming(true)
     setStreamingContent('')
     startStreamMetrics()
 
     const ctrl = adapter.sendMessage(
-      state.currentChatId, content, state.selectedModel,
+      chatId, content, model,
       (tok) => appendStreamingContent(tok),
-      async () => {
+      async (result) => {
+        if (result?.aborted) return
         const finalState = useStore.getState()
-        appendMessage({ id: `a${Date.now()}`, chatId: state.currentChatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics })
+        appendMessage({ id: `a${Date.now()}`, chatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics })
         setStreamingContent('')
-        setIsStreaming(false)
         setStreamController(null)
         clearStreamMetrics()
         const cs = await adapter.listChats()
         setChats(cs)
+        const next = shiftQueuedMessage()
+        if (next) {
+          startGeneration(next.chatId, next.content, next.model || useStore.getState().selectedModel)
+        } else {
+          setIsStreaming(false)
+        }
       },
       (err) => {
         setIsStreaming(false)
@@ -91,6 +95,18 @@ export function useChat() {
     )
     setStreamController(ctrl)
   }, [])
+
+  const sendMessage = useCallback(async () => {
+    const state = useStore.getState()
+    if (!state.input.trim() || !state.currentChatId) return
+    const content = state.input.trim()
+    setInput('')
+    if (state.isStreaming) {
+      enqueueMessage({ chatId: state.currentChatId, content, model: state.selectedModel })
+      return
+    }
+    startGeneration(state.currentChatId, content, state.selectedModel)
+  }, [startGeneration])
 
   const stopGeneration = useCallback(() => {
     const { streamController: ctrl, streamingContent: content, streamMetrics: metrics, currentChatId: chatId } = useStore.getState()
@@ -145,7 +161,7 @@ export function useChat() {
     models, selectedModel, setSelectedModel,
     chats, currentChatId,
     messages, streamingContent, isStreaming,
-    streamMetrics,
+    streamMetrics, queuedMessages,
     input, setInput,
     loadModels, loadChats, selectChat, newChat,
     sendMessage, stopGeneration, regenerate, handleKeyDown,

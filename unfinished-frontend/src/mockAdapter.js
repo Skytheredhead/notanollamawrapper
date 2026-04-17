@@ -15,7 +15,7 @@ const RESPONSES = [
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let cidx = 2
 let chats = [
-  { id: 'c1', title: 'Welcome to naow', model: 'llama3:8b', updatedAt: new Date().toISOString() },
+  { id: 'c1', title: 'Welcome to naow', model: 'llama3:8b', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 ]
 const msgs = {
   c1: [
@@ -39,7 +39,8 @@ const mockAdapter = {
 
   async createChat(title = 'New Chat', model = MODELS[0]) {
     await sleep(40)
-    const chat = { id: `c${++cidx}`, title, model, updatedAt: new Date().toISOString() }
+    const now = new Date().toISOString()
+    const chat = { id: `c${++cidx}`, title, model, createdAt: now, updatedAt: now }
     chats = [chat, ...chats]
     msgs[chat.id] = []
     return chat

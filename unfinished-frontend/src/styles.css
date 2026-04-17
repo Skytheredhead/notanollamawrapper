@@ -37,17 +37,18 @@ button, input, textarea, select { font: inherit; }
     linear-gradient(145deg, rgba(255,255,255,0.8), rgba(240,242,239,0.44)),
     var(--bg);
   color: var(--ink);
-  transition: background 420ms ease, color 240ms ease;
+  transition: background-color 650ms ease, color 520ms ease;
 }
 
 .app::before,
-.app::after {
+.app::after,
+.app .themeFade {
   content: "";
   position: fixed;
   top: 0;
   bottom: 0;
   width: min(24vw, 420px);
-  z-index: 10;
+  z-index: 15;
   pointer-events: none;
 }
 
@@ -59,6 +60,22 @@ button, input, textarea, select { font: inherit; }
 .app::after {
   right: 0;
   background: linear-gradient(270deg, var(--edge-fade) 0%, color-mix(in srgb, var(--edge-fade) 78%, transparent) 38%, transparent 100%);
+}
+
+.app .themeFade {
+  inset: 0;
+  width: auto;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 650ms ease;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(76, 92, 119, 0.36), transparent 32%),
+    radial-gradient(circle at 78% 22%, rgba(97, 72, 55, 0.28), transparent 34%),
+    linear-gradient(145deg, rgba(20,21,24,0.96), rgba(12,13,15,0.98));
+}
+
+.color-dark .themeFade {
+  opacity: 1;
 }
 
 .topBar {
@@ -89,20 +106,22 @@ button, input, textarea, select { font: inherit; }
   border-radius: var(--radius);
   border: 1px solid var(--line);
   cursor: pointer;
-  transition: transform 160ms ease, box-shadow 180ms ease, background 220ms ease, border-color 180ms ease;
+  transition: transform 160ms ease, box-shadow 240ms ease, background 520ms ease, color 520ms ease, border-color 420ms ease;
 }
 
 .brandButton {
   background: transparent;
   border-color: transparent;
   color: var(--ink);
-  font-size: 22px;
+  font-size: clamp(24px, 1.8vw, 38px);
   font-weight: 600;
   letter-spacing: -0.02em;
-  padding: 8px 10px;
-  cursor: default;
+  padding: 6px 10px;
+  cursor: pointer;
+  line-height: 1;
 }
 
+.brandButton:hover,
 .iconButton:hover,
 .softButton:hover,
 .sendButton:hover,
@@ -113,7 +132,7 @@ button, input, textarea, select { font: inherit; }
 
 .searchWrap {
   position: relative;
-  width: min(460px, 42vw);
+  width: clamp(210px, 24vw, 330px);
 }
 
 .searchInput {
@@ -125,7 +144,7 @@ button, input, textarea, select { font: inherit; }
   outline: none;
   padding: 10px 13px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.4);
-  transition: box-shadow 180ms ease, border-color 180ms ease, background 220ms ease;
+  transition: box-shadow 180ms ease, border-color 240ms ease, background 520ms ease, color 520ms ease;
 }
 
 .searchInput:focus {
@@ -196,6 +215,7 @@ button, input, textarea, select { font: inherit; }
   backdrop-filter: blur(22px) saturate(1.08);
   animation: pop 180ms ease both;
   transform-origin: 92% 0;
+  transition: background 520ms ease, border-color 420ms ease, box-shadow 420ms ease;
 }
 
 .settingsPanel.isClosing {
@@ -239,7 +259,8 @@ button, input, textarea, select { font: inherit; }
   border-color: var(--accent);
 }
 
-.settingsPanel select {
+.settingsPanel select,
+.settingsTextInput {
   appearance: none;
   -webkit-appearance: none;
   width: 100%;
@@ -251,15 +272,22 @@ button, input, textarea, select { font: inherit; }
   padding: 9px 34px 9px 10px;
   outline: none;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.42);
-  transition: transform 170ms ease, border-color 170ms ease, box-shadow 170ms ease, background 220ms ease;
+  transition: transform 170ms ease, border-color 240ms ease, box-shadow 240ms ease, background 520ms ease, color 520ms ease;
 }
 
-.settingsPanel select:hover {
+.settingsTextInput {
+  appearance: auto;
+  -webkit-appearance: auto;
+}
+
+.settingsPanel select:hover,
+.settingsTextInput:hover {
   transform: translateY(-1px);
   border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
 }
 
-.settingsPanel select:focus {
+.settingsPanel select:focus,
+.settingsTextInput:focus {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
 }
@@ -288,7 +316,7 @@ button, input, textarea, select { font: inherit; }
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--surface-strong) 96%, transparent), color-mix(in srgb, var(--surface) 76%, transparent));
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.44);
-  transition: transform 170ms ease, background 170ms ease, border-color 170ms ease, box-shadow 170ms ease;
+  transition: transform 170ms ease, background 520ms ease, border-color 240ms ease, box-shadow 240ms ease;
   position: relative;
 }
 
@@ -376,7 +404,7 @@ button, input, textarea, select { font: inherit; }
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
   animation: rise 260ms ease both;
-  transition: transform 180ms ease, background 220ms ease, border-color 180ms ease;
+  transition: transform 180ms ease, background 520ms ease, color 520ms ease, border-color 420ms ease;
 }
 
 .message:hover {
@@ -499,6 +527,51 @@ button, input, textarea, select { font: inherit; }
   padding: 13px 22px 18px;
 }
 
+.queueShelf {
+  width: min(880px, calc(100vw - 116px));
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  animation: rise 180ms ease both;
+}
+
+.queueLabel {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.queueItems {
+  min-width: 0;
+  display: flex;
+  gap: 7px;
+  overflow: hidden;
+}
+
+.queueChip {
+  max-width: min(280px, 36vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
+  color: var(--ink);
+  padding: 7px 10px;
+  box-shadow: 0 8px 22px rgba(30, 30, 30, 0.08);
+  backdrop-filter: blur(16px);
+  transition: background 520ms ease, color 520ms ease, border-color 420ms ease;
+}
+
+.queueChip.more {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
 .composerShell {
   width: min(880px, calc(100vw - 116px));
   margin: 0 auto;
@@ -512,6 +585,7 @@ button, input, textarea, select { font: inherit; }
   padding: 10px;
   box-shadow: 0 14px 46px rgba(30, 30, 30, 0.1);
   backdrop-filter: blur(20px);
+  transition: background 520ms ease, color 520ms ease, border-color 420ms ease, box-shadow 420ms ease;
 }
 
 .composer textarea {
@@ -644,11 +718,16 @@ pre {
   --accent-ink: #111111;
   --shadow: 0 28px 88px rgba(0, 0, 0, 0.36);
   --edge-fade: #101113;
+}
+
+.color-dark.newThreadButton,
+.color-dark .newThreadButton {
   background:
-    radial-gradient(circle at 30% 18%, rgba(76, 92, 119, 0.36), transparent 32%),
-    radial-gradient(circle at 78% 22%, rgba(97, 72, 55, 0.28), transparent 34%),
-    linear-gradient(145deg, rgba(20,21,24,0.96), rgba(12,13,15,0.98)),
-    var(--bg);
+    linear-gradient(180deg, rgba(45, 47, 52, 0.92), rgba(28, 29, 33, 0.92));
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255,255,255,0.12);
+  color: #f2f0eb;
+  backdrop-filter: blur(16px) saturate(1.02);
 }
 
 @keyframes rise {

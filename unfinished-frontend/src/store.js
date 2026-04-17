@@ -8,6 +8,8 @@ const useStore = create(
       setTheme: (theme) => set({ theme }),
       colorMode: 'system',
       setColorMode: (colorMode) => set({ colorMode }),
+      userName: '',
+      setUserName: (userName) => set({ userName }),
       showMetrics: true,
       setShowMetrics: (showMetrics) => set({ showMetrics }),
 
@@ -51,6 +53,7 @@ const useStore = create(
       streamingContent: '',
       streamController: null,
       streamMetrics: null,
+      queuedMessages: [],
       setIsStreaming: (v) => set({ isStreaming: v }),
       setStreamingContent: (c) => set({ streamingContent: c }),
       appendStreamingContent: (chunk) =>
@@ -70,6 +73,17 @@ const useStore = create(
       setStreamController: (c) => set({ streamController: c }),
       startStreamMetrics: () => set({ streamMetrics: { startedAt: performance.now(), firstTokenAt: null, tokens: 0, updatedAt: performance.now() } }),
       clearStreamMetrics: () => set({ streamMetrics: null }),
+      enqueueMessage: (msg) =>
+        set((s) => ({ queuedMessages: [...s.queuedMessages, { id: `q${Date.now()}${s.queuedMessages.length}`, ...msg }] })),
+      shiftQueuedMessage: () => {
+        let next = null
+        set((s) => {
+          next = s.queuedMessages[0] || null
+          return { queuedMessages: s.queuedMessages.slice(1) }
+        })
+        return next
+      },
+      clearQueuedMessages: () => set({ queuedMessages: [] }),
 
       input: '',
       setInput: (v) => set({ input: v }),
@@ -79,7 +93,7 @@ const useStore = create(
     }),
     {
       name: 'naow-persist',
-      partialize: (s) => ({ theme: s.theme, colorMode: s.colorMode, selectedModel: s.selectedModel, showMetrics: s.showMetrics }),
+      partialize: (s) => ({ theme: s.theme, colorMode: s.colorMode, userName: s.userName, selectedModel: s.selectedModel, showMetrics: s.showMetrics }),
     }
   )
 )
