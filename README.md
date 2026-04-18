@@ -1,4 +1,4 @@
-# naow - not another ollama wrapper
+# naow - not an ollama wrapper
 
 Optimized for speed and doesn't rely on Ollama or any other app behind the scenes.
 
