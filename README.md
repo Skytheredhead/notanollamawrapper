@@ -1,19 +1,30 @@
-# naow backend
+# naow
 
-Backend-only local HTTP API for `notanollamawrapper`, visible name `naow`.
+Local chat app for `notanollamawrapper`, visible name `naow`.
 
-This server talks to local Ollama models, persists chats in SQLite, and exposes a frontend-agnostic JSON/SSE API. It does not include frontend UI, HTML pages, bundled client assets, auth, cloud providers, RAG, tools, plugins, or file uploads.
+The backend talks to local Ollama models, persists chats in SQLite, exposes a JSON/SSE API, and serves the built Vite frontend from `frontend/dist`. The search endpoint is intentionally not implemented yet; the reminder lives in `frontend/BACKEND_SEARCH_TODO.md`.
 
 ## Requirements
 
 - Node.js 22+
 - Ollama running locally
+- Apple Silicon Mac for the MLX runner
+- Python 3.11+ for MLX setup
 
 ## Install
 
 ```bash
 npm install
+npm --prefix frontend install
 ```
+
+Optional MLX runner setup:
+
+```bash
+npm run setup:mlx
+```
+
+The setup command creates `.naow/mlx-venv` and installs the Python sidecar dependencies. Restart the backend after setup so it can auto-start the runner.
 
 ## Start Ollama
 
@@ -22,21 +33,36 @@ ollama serve
 ollama pull llama3.2
 ```
 
-## Run Backend
+## Run App
 
-Development:
+Backend development:
 
 ```bash
 npm run dev
 ```
 
-Production-style local run:
+Frontend development:
+
+```bash
+npm run dev:frontend
+```
+
+The Vite dev server runs on `http://127.0.0.1:5173` and proxies `/api` and `/health` to the backend at `http://127.0.0.1:5050`.
+
+Production-style local run with the frontend served by Fastify:
+
+```bash
+npm run build:frontend
+npm start
+```
+
+API-only local run:
 
 ```bash
 npm start
 ```
 
-Default base URL:
+Default backend base URL:
 
 ```text
 http://127.0.0.1:5050
@@ -49,11 +75,40 @@ http://127.0.0.1:5050
 | `HOST` | `127.0.0.1` | Bind host. |
 | `PORT` | `5050` | Bind port. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama HTTP API URL. |
+| `OLLAMA_API_KEY` | empty | Enables Ollama web search when the Settings toggle allows it. |
+| `OLLAMA_WEB_SEARCH_URL` | `https://ollama.com/api/web_search` | Ollama web search endpoint. |
 | `NAOW_DATA_DIR` | `.naow` | Local data directory when `NAOW_DB_PATH` is unset. |
 | `NAOW_DB_PATH` | empty | Explicit SQLite file path. Wins over `NAOW_DATA_DIR`. |
 | `NAOW_DEFAULT_MODEL` | empty | Optional fallback model for generation requests. |
 | `NAOW_CORS_ORIGIN` | `*` | CORS origin for local frontend development. |
 | `NAOW_OLLAMA_TIMEOUT_MS` | `5000` | Timeout for health/model-list Ollama checks. |
+| `NAOW_WEB_SEARCH_MAX_RESULTS` | `5` | Maximum Ollama web search results injected into model context. |
+| `NAOW_FRONTEND_DIST` | `frontend/dist` | Built frontend directory served by the backend. |
+| `NAOW_MLX_BASE_URL` | `http://127.0.0.1:5055` | MLX sidecar URL. |
+| `NAOW_MLX_MODEL` | `mlx-community/Qwen3.5-9B-MLX-4bit` | First MLX model. |
+| `NAOW_MLX_RESIDENCY` | `always_hot` | Default MLX model residency. |
+| `NAOW_MLX_AUTOSTART` | `true` | Auto-start the Python MLX sidecar when the backend starts. |
+| `NAOW_MLX_PYTHON` | `.naow/mlx-venv/bin/python` | Python executable used for the sidecar. |
+
+### MLX Model Download
+
+The app prompts to download supported MLX models when the runner is available and files are missing. Models are stored in the naow app data models directory instead of relying on the global Hugging Face cache.
+
+Supported MLX models:
+
+- `mlx-community/Qwen3.5-9B-MLX-4bit` - pinned and kept loaded.
+- `Jiunsong/supergemma4-26b-uncensored-mlx-4bit-v2` - pinned and kept loaded after download.
+- `mlx-community/gpt-oss-20b-MXFP4-Q8` - loaded on demand.
+- `mlx-community/Qwen3-0.6B-4bit-DWQ-053125` - loaded on demand.
+
+The sidecar runs an MLX native preflight in a child process before loading a model. If MLX/Metal crashes during import, `/api/mlx/preflight` and `/health` report the failure without taking down the sidecar.
+
+Frontend environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `VITE_API_URL` | `/api` | API base URL used by the Vite client. |
+| `VITE_USE_MOCK` | `false` | Set to `true` to use the mock adapter instead of the backend. |
 
 The default SQLite database path is:
 
@@ -113,6 +168,23 @@ Response:
       }
     }
   ]
+}
+```
+
+### Unload Ollama Models
+
+Unload currently running Ollama models from memory:
+
+```bash
+curl -X POST http://127.0.0.1:5050/api/models/unload
+```
+
+Response:
+
+```json
+{
+  "unloaded": ["llama3.2:latest"],
+  "count": 1
 }
 ```
 
@@ -225,6 +297,7 @@ curl -N -X POST http://127.0.0.1:5050/api/chats/CHAT_ID/messages \
   -d '{
     "content": "Explain SQLite WAL mode in one paragraph.",
     "model": "llama3.2:latest",
+    "webSearch": true,
     "options": {
       "temperature": 0.7,
       "num_predict": 512
@@ -238,6 +311,7 @@ Rules:
 - `model` overrides the chat model for this generation.
 - If `model` is provided and the chat has no model, the backend saves it to the chat.
 - `options` is passed to Ollama.
+- `webSearch` defaults to `true`; actual web search requires `OLLAMA_API_KEY`.
 - One active generation per chat is allowed.
 
 ### Stop Generation By Chat

@@ -79,3 +79,27 @@ test('database excludes replaced messages by default and includes them when requ
     cleanup();
   }
 });
+
+test('visible context includes image attachments', () => {
+  const { db, cleanup } = tempDb();
+  try {
+    const chat = db.createChat({ systemPrompt: 'Look carefully.' });
+    db.createUserMessageWithAttachments(chat.id, 'Describe this', [
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        originalName: 'pixel.png',
+        path: '/tmp/pixel.png',
+        sizeBytes: 68
+      }
+    ]);
+
+    const context = db.getVisibleContext(db.getChat(chat.id));
+    assert.equal(context.length, 2);
+    assert.equal(context[0].role, 'system');
+    assert.equal(context[1].attachments.length, 1);
+    assert.equal(context[1].attachments[0].path, '/tmp/pixel.png');
+  } finally {
+    cleanup();
+  }
+});

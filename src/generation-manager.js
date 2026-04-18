@@ -9,9 +9,15 @@ export class GenerationInProgressError extends Error {
 }
 
 export class GenerationManager {
-  constructor() {
+  constructor({ now = () => Date.now() } = {}) {
     this.byGenerationId = new Map();
     this.byChatId = new Map();
+    this.now = now;
+    this.lastActivityAt = this.now();
+  }
+
+  touch() {
+    this.lastActivityAt = this.now();
   }
 
   start({ chatId, assistantMessageId }) {
@@ -32,7 +38,16 @@ export class GenerationManager {
 
     this.byGenerationId.set(generationId, entry);
     this.byChatId.set(chatId, generationId);
+    this.touch();
     return entry;
+  }
+
+  activeCount() {
+    return this.byGenerationId.size;
+  }
+
+  hasActive() {
+    return this.activeCount() > 0;
   }
 
   getByChat(chatId) {
@@ -62,6 +77,7 @@ export class GenerationManager {
     if (entry.abortController.signal.aborted) return;
     entry.stopReason = reason;
     entry.abortController.abort(reason);
+    this.touch();
   }
 
   finish(generationId) {
@@ -72,6 +88,7 @@ export class GenerationManager {
     if (activeForChat === generationId) {
       this.byChatId.delete(entry.chatId);
     }
+    this.touch();
   }
 
   stopAll(reason = 'server_shutdown') {

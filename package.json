@@ -1,17 +1,27 @@
 {
   "name": "notanollamawrapper",
   "version": "0.1.0",
-  "description": "Backend-only local HTTP API for naow chat over Ollama.",
+  "description": "Local naow chat app over Ollama.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "setup:mlx": "python3 scripts/setup_mlx.py",
+    "dev:mlx": ".naow/mlx-venv/bin/python -m mlx_runner.server",
+    "setup:search": "python3 scripts/setup_search.py",
+    "search:start": "python3 scripts/run_search.py",
+    "search:status": "curl -s http://127.0.0.1:5050/api/search/status || true",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "preview:frontend": "npm --prefix frontend run preview",
     "test": "node --test"
   },
   "dependencies": {
+    "@fastify/multipart": "^10.0.0",
     "better-sqlite3": "latest",
-    "fastify": "latest"
+    "fastify": "latest",
+    "htmlparser2": "^12.0.0"
   },
   "engines": {
     "node": ">=22"

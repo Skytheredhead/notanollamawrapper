@@ -17,6 +17,12 @@ function rowToChat(row) {
 
 function rowToMessage(row) {
   if (!row) return null;
+  let metadata = {};
+  try {
+    metadata = row.metadata_json ? JSON.parse(row.metadata_json) : {};
+  } catch {
+    metadata = {};
+  }
   return {
     id: row.id,
     chatId: row.chat_id,
@@ -27,7 +33,25 @@ function rowToMessage(row) {
     error: row.error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    completedAt: row.completed_at
+    completedAt: row.completed_at,
+    metadata,
+    metrics: metadata.metrics || null
+  };
+}
+
+function rowToAttachment(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    messageId: row.message_id,
+    chatId: row.chat_id,
+    type: row.type,
+    mimeType: row.mime_type,
+    name: row.original_name,
+    path: row.path,
+    sizeBytes: row.size_bytes,
+    createdAt: row.created_at,
+    url: `/api/attachments/${row.id}`
   };
 }
 
@@ -109,7 +133,20 @@ export class LocalDatabase {
         error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        completed_at TEXT
+        completed_at TEXT,
+        metadata_json TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (type IN ('image')),
+        mime_type TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_chats_updated_at
@@ -120,7 +157,15 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_messages_generation
         ON messages(generation_id);
+
+      CREATE INDEX IF NOT EXISTS idx_message_attachments_message
+        ON message_attachments(message_id);
     `);
+
+    const messageColumns = this.db.prepare('PRAGMA table_info(messages)').all();
+    if (!messageColumns.some((column) => column.name === 'metadata_json')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN metadata_json TEXT');
+    }
   }
 
   prepare() {
@@ -185,7 +230,8 @@ export class LocalDatabase {
           error,
           created_at,
           updated_at,
-          completed_at
+          completed_at,
+          metadata_json
         )
         VALUES (
           @id,
@@ -197,7 +243,8 @@ export class LocalDatabase {
           @error,
           @createdAt,
           @updatedAt,
-          @completedAt
+          @completedAt,
+          @metadataJson
         )
       `),
       getMessage: this.db.prepare('SELECT * FROM messages WHERE id = ?'),
@@ -212,14 +259,14 @@ export class LocalDatabase {
         ORDER BY created_at ASC, id ASC
       `),
       getVisibleContext: this.db.prepare(`
-        SELECT role, content FROM messages
+        SELECT id, role, content FROM messages
         WHERE chat_id = ?
           AND status IN ('complete', 'cancelled')
           AND content != ''
         ORDER BY created_at ASC, id ASC
       `),
       getVisibleContextBefore: this.db.prepare(`
-        SELECT role, content FROM messages
+        SELECT id, role, content FROM messages
         WHERE chat_id = ?
           AND status IN ('complete', 'cancelled')
           AND content != ''
@@ -236,19 +283,60 @@ export class LocalDatabase {
       `),
       finalizeMessage: this.db.prepare(`
         UPDATE messages
-        SET content = ?, status = ?, error = ?, updated_at = ?, completed_at = ?
+        SET content = ?, status = ?, error = ?, updated_at = ?, completed_at = ?, metadata_json = ?
         WHERE id = ?
       `),
       markMessageReplaced: this.db.prepare(`
         UPDATE messages
         SET status = 'replaced', updated_at = ?
         WHERE id = ?
+      `),
+      insertAttachment: this.db.prepare(`
+        INSERT INTO message_attachments (
+          id,
+          message_id,
+          chat_id,
+          type,
+          mime_type,
+          original_name,
+          path,
+          size_bytes,
+          created_at
+        )
+        VALUES (
+          @id,
+          @messageId,
+          @chatId,
+          @type,
+          @mimeType,
+          @originalName,
+          @path,
+          @sizeBytes,
+          @createdAt
+        )
+      `),
+      getAttachment: this.db.prepare('SELECT * FROM message_attachments WHERE id = ?'),
+      listAttachmentPaths: this.db.prepare('SELECT path FROM message_attachments'),
+      getAttachmentsForChat: this.db.prepare(`
+        SELECT * FROM message_attachments
+        WHERE chat_id = ?
+        ORDER BY created_at ASC, id ASC
+      `),
+      getContextAttachments: this.db.prepare(`
+        SELECT * FROM message_attachments
+        WHERE message_id = ?
+        ORDER BY created_at ASC, id ASC
       `)
     };
   }
 
   close() {
     this.db.close();
+  }
+
+  checkpoint() {
+    this.db.pragma('wal_checkpoint(PASSIVE)');
+    this.db.pragma('optimize');
   }
 
   isHealthy() {
@@ -309,7 +397,17 @@ export class LocalDatabase {
     const rows = includeReplaced
       ? this.statements.getMessagesAll.all(chatId)
       : this.statements.getMessagesVisible.all(chatId);
-    return rows.map(rowToMessage);
+    const messages = rows.map(rowToMessage);
+    const attachments = this.statements.getAttachmentsForChat.all(chatId).map(rowToAttachment);
+    const byMessage = new Map();
+    for (const attachment of attachments) {
+      if (!byMessage.has(attachment.messageId)) byMessage.set(attachment.messageId, []);
+      byMessage.get(attachment.messageId).push(attachment);
+    }
+    return messages.map((message) => ({
+      ...message,
+      attachments: byMessage.get(message.id) || []
+    }));
   }
 
   getVisibleContext(chat, beforeMessage = null) {
@@ -324,7 +422,8 @@ export class LocalDatabase {
 
     const messages = rows.map((row) => ({
       role: row.role,
-      content: row.content
+      content: row.content,
+      attachments: this.statements.getContextAttachments.all(row.id).map(rowToAttachment)
     }));
 
     if (chat.systemPrompt) {
@@ -349,7 +448,8 @@ export class LocalDatabase {
       error: null,
       createdAt: timestamp,
       updatedAt: timestamp,
-      completedAt: timestamp
+      completedAt: timestamp,
+      metadataJson: null
     };
 
     const transaction = this.db.transaction(() => {
@@ -358,6 +458,49 @@ export class LocalDatabase {
     });
     transaction();
     return message;
+  }
+
+  createUserMessageWithAttachments(chatId, content, attachments = []) {
+    const message = this.createUserMessage(chatId, content);
+    for (const attachment of attachments) {
+      this.createAttachment({
+        ...attachment,
+        chatId,
+        messageId: message.id
+      });
+    }
+    return {
+      ...message,
+      attachments: this.statements.getContextAttachments.all(message.id).map(rowToAttachment)
+    };
+  }
+
+  createAttachment({ chatId, messageId, type = 'image', mimeType, originalName, path: filePath, sizeBytes }) {
+    const attachment = {
+      id: randomUUID(),
+      messageId,
+      chatId,
+      type,
+      mimeType,
+      originalName,
+      path: filePath,
+      sizeBytes,
+      createdAt: this.now()
+    };
+    this.statements.insertAttachment.run(attachment);
+    return {
+      ...attachment,
+      name: originalName,
+      url: `/api/attachments/${attachment.id}`
+    };
+  }
+
+  getAttachment(attachmentId) {
+    return rowToAttachment(this.statements.getAttachment.get(attachmentId));
+  }
+
+  listAttachmentPaths() {
+    return this.statements.listAttachmentPaths.all().map((row) => row.path).filter(Boolean);
   }
 
   createAssistantMessage(chatId, generationId) {
@@ -372,7 +515,8 @@ export class LocalDatabase {
       error: null,
       createdAt: timestamp,
       updatedAt: timestamp,
-      completedAt: null
+      completedAt: null,
+      metadataJson: null
     };
 
     this.statements.insertMessage.run(message);
@@ -383,7 +527,7 @@ export class LocalDatabase {
     return rowToMessage(this.statements.getMessage.get(messageId));
   }
 
-  finalizeMessage(messageId, { content, status, error = null }) {
+  finalizeMessage(messageId, { content, status, error = null, metadata = null } = {}) {
     const timestamp = this.now();
     this.statements.finalizeMessage.run(
       content,
@@ -391,6 +535,7 @@ export class LocalDatabase {
       error,
       timestamp,
       timestamp,
+      metadata ? JSON.stringify(metadata) : null,
       messageId
     );
     const message = this.getMessage(messageId);

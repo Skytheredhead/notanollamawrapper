@@ -2,26 +2,74 @@ import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { LocalDatabase } from './db.js';
 import { GenerationManager } from './generation-manager.js';
+import { IdleResourceGuard } from './idle-resource-guard.js';
+import { HybridModelClient, MlxClient, MlxSidecar } from './mlx.js';
 import { OllamaClient } from './ollama.js';
+import { SearxngSidecar } from './search-sidecar.js';
+import { WebSearchClient } from './web-search.js';
 
 const config = loadConfig();
 const db = new LocalDatabase(config.dbPath);
 const generationManager = new GenerationManager();
+const mlxPort = new URL(config.mlxBaseUrl).port || '5055';
+const mlxSidecar = new MlxSidecar({
+  python: config.mlxPython,
+  cwd: process.cwd(),
+  port: Number.parseInt(mlxPort, 10),
+  autostart: config.mlxAutostart,
+  home: config.dataDir
+});
+mlxSidecar.start();
+const mlx = new MlxClient({
+  baseUrl: config.mlxBaseUrl,
+  timeoutMs: config.ollamaTimeoutMs,
+  modelName: config.mlxModel,
+  residency: config.mlxResidency
+});
 const ollama = new OllamaClient({
   baseUrl: config.ollamaBaseUrl,
-  timeoutMs: config.ollamaTimeoutMs
+  timeoutMs: config.ollamaTimeoutMs,
+  apiKey: config.ollamaApiKey,
+  webSearchUrl: config.ollamaWebSearchUrl
+});
+const modelClient = new HybridModelClient({ mlx, ollama });
+const searchSidecar = new SearxngSidecar({
+  home: config.searchHome,
+  url: config.searchUrl,
+  settingsPath: config.searchSettingsPath,
+  settingsTemplatePath: config.searchSettingsTemplatePath,
+  setupScript: config.searchSetupScript,
+  python: config.searchPython,
+  managed: config.searchManaged,
+  timeoutMs: Math.min(config.searchTimeoutMs, 1500),
+  setupTimeoutMs: config.searchSetupTimeoutMs
+});
+const searchClient = new WebSearchClient({
+  config,
+  sidecar: searchSidecar
 });
 
 const app = buildApp({
   config,
   db,
-  ollama,
-  generationManager
+  ollama: modelClient,
+  generationManager,
+  searchClient
+});
+const idleGuard = new IdleResourceGuard({
+  config,
+  generationManager,
+  modelClient,
+  searchClient,
+  db
 });
 
 async function shutdown(signal) {
+  idleGuard.stop();
   generationManager.stopAll('server_shutdown');
   await app.close();
+  mlxSidecar.stop();
+  await searchSidecar.stop();
   db.close();
   console.log(`naow backend stopped by ${signal}`);
 }
@@ -39,11 +87,20 @@ try {
     host: config.host,
     port: config.port
   });
+  idleGuard.start();
   console.log(`naow backend listening on http://${config.host}:${config.port}`);
   console.log(`SQLite database: ${config.dbPath}`);
-  console.log(`Ollama URL: ${config.ollamaBaseUrl}`);
+  console.log(`MLX URL: ${config.mlxBaseUrl}`);
+  console.log(`Ollama fallback URL: ${config.ollamaBaseUrl}`);
+  console.log(`Local search URL: ${config.searchUrl}`);
+  console.log(`Local search home: ${config.searchHome}`);
+  searchClient.warmup().catch((error) => {
+    console.warn(`Local search warmup skipped: ${error.message}`);
+  });
 } catch (error) {
   console.error(error);
+  idleGuard.stop();
+  mlxSidecar.stop();
   db.close();
   process.exit(1);
 }

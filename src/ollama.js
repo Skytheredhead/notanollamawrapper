@@ -43,10 +43,16 @@ function normalizeModel(model) {
 }
 
 export class OllamaClient {
-  constructor({ baseUrl, timeoutMs = 5000, fetchImpl = fetch }) {
+  constructor({ baseUrl, timeoutMs = 5000, apiKey = null, webSearchUrl = 'https://ollama.com/api/web_search', fetchImpl = fetch }) {
     this.baseUrl = baseUrl;
     this.timeoutMs = timeoutMs;
+    this.apiKey = apiKey;
+    this.webSearchUrl = webSearchUrl;
     this.fetch = fetchImpl;
+  }
+
+  canWebSearch() {
+    return Boolean(this.apiKey);
   }
 
   async getVersion() {
@@ -79,6 +85,105 @@ export class OllamaClient {
       return (payload.models || []).map(normalizeModel);
     } catch (error) {
       throw new OllamaUnavailableError(this.baseUrl, error);
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async listRunningModels() {
+    const timeout = timeoutSignal(this.timeoutMs);
+    try {
+      const response = await this.fetch(`${this.baseUrl}/api/ps`, {
+        signal: timeout.signal
+      });
+      if (!response.ok) {
+        throw new Error(`Ollama returned HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      return (payload.models || []).map(normalizeModel);
+    } catch (error) {
+      throw new OllamaUnavailableError(this.baseUrl, error);
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async unloadModel(model) {
+    const timeout = timeoutSignal(this.timeoutMs);
+    try {
+      const response = await this.fetch(`${this.baseUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          keep_alive: 0
+        }),
+        signal: timeout.signal
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`Ollama returned HTTP ${response.status}${body ? `: ${body}` : ''}`);
+      }
+      return await response.json().catch(() => ({}));
+    } catch (error) {
+      throw new OllamaUnavailableError(this.baseUrl, error);
+    } finally {
+      timeout.clear();
+    }
+  }
+
+  async unloadLoadedModels() {
+    const running = await this.listRunningModels();
+    const names = [...new Set(running.map((model) => model.name).filter(Boolean))];
+    for (const name of names) {
+      await this.unloadModel(name);
+    }
+    return {
+      unloaded: names,
+      count: names.length
+    };
+  }
+
+  async webSearch(query, { maxResults = 5, signal } = {}) {
+    if (!this.apiKey) {
+      return { results: [], skipped: 'missing_api_key' };
+    }
+
+    const timeout = timeoutSignal(this.timeoutMs);
+    const requestSignal = typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([timeout.signal, signal].filter(Boolean))
+      : (signal || timeout.signal);
+
+    try {
+      const response = await this.fetch(this.webSearchUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          query,
+          max_results: maxResults
+        }),
+        signal: requestSignal
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`Ollama web search returned HTTP ${response.status}${body ? `: ${body}` : ''}`);
+      }
+
+      const payload = await response.json();
+      return {
+        results: (payload.results || []).map((result) => ({
+          title: result.title || '',
+          url: result.url || '',
+          content: result.content || ''
+        })).filter((result) => result.title || result.url || result.content)
+      };
     } finally {
       timeout.clear();
     }
@@ -176,6 +281,40 @@ export class OllamaClient {
       }
     } finally {
       reader.releaseLock();
+    }
+  }
+
+  async completeChat({ model, messages, tools, options, signal }) {
+    const timeout = timeoutSignal(this.timeoutMs);
+    const requestSignal = typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([timeout.signal, signal].filter(Boolean))
+      : (signal || timeout.signal);
+    try {
+      const response = await this.fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          messages,
+          tools: tools?.length ? tools : undefined,
+          options: options || undefined
+        }),
+        signal: requestSignal
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new OllamaStreamError(`Ollama returned HTTP ${response.status}${body ? `: ${body}` : ''}`);
+      }
+      return await response.json();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (error instanceof OllamaStreamError) throw error;
+      throw new OllamaUnavailableError(this.baseUrl, error);
+    } finally {
+      timeout.clear();
     }
   }
 }

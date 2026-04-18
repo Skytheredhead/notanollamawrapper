@@ -183,7 +183,8 @@ test('message stream emits normalized events and persists final assistant conten
       method: 'POST',
       url: `/api/chats/${chat.id}/messages`,
       payload: {
-        content: 'Say hello'
+        content: 'Say hello',
+        webSearch: false
       }
     });
 
@@ -197,11 +198,15 @@ test('message stream emits normalized events and persists final assistant conten
     ]);
     assert.equal(events[1].data.delta, 'Hello ');
     assert.equal(events[3].data.message.content, 'Hello there.');
+    assert.equal(typeof events[3].data.message.metrics.generationMs, 'number');
+    assert.equal(events[3].data.message.metrics.webSearchMs, 0);
+    assert.equal(events[3].data.message.metrics.tokenCount, 2);
 
     const messages = harness.db.getMessages(chat.id);
     assert.equal(messages.length, 2);
     assert.equal(messages[1].status, 'complete');
     assert.equal(messages[1].content, 'Hello there.');
+    assert.equal(messages[1].metrics.tokenCount, 2);
   } finally {
     await harness.cleanup();
   }

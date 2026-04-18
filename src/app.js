@@ -1,11 +1,20 @@
 import Fastify from 'fastify';
+import multipart from '@fastify/multipart';
 import { ApiError, sendError } from './errors.js';
+import { registerFrontend } from './frontend.js';
 import { registerRoutes } from './routes.js';
 
-export function buildApp({ config, db, ollama, generationManager }) {
+export function buildApp({ config, db, ollama, generationManager, searchClient = null }) {
   const app = Fastify({
     logger: false,
-    bodyLimit: 1024 * 1024
+    bodyLimit: 24 * 1024 * 1024
+  });
+
+  app.register(multipart, {
+    limits: {
+      fileSize: 20 * 1024 * 1024,
+      files: 8
+    }
   });
 
   app.addHook('onRequest', (request, reply, done) => {
@@ -39,7 +48,11 @@ export function buildApp({ config, db, ollama, generationManager }) {
     config,
     db,
     ollama,
-    generationManager
+    generationManager,
+    searchClient
+  });
+  registerFrontend(app, {
+    distDir: config.frontendDist
   });
 
   return app;

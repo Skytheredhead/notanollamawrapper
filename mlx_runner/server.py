@@ -1,0 +1,474 @@
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+
+from .app_paths import MODEL_DIR, ensure_dirs
+from .downloader import start_download, status as download_status
+from .model_registry import DEFAULT_MODEL, MODEL_SPECS, ModelSpec, model_payload, model_ready, spec_for_name
+
+app = FastAPI()
+_runtime_lock = threading.RLock()
+_runtime: dict[str, Any] = {
+    "loaded": {},
+    "residency": "always_hot",
+    "activeStreams": 0,
+    "lastActiveAt": time.monotonic(),
+    "idleUnloadSeconds": float(os.environ.get("NAOW_MLX_IDLE_UNLOAD_SECONDS", "120")),
+    "idleCheckSeconds": float(os.environ.get("NAOW_MLX_IDLE_CHECK_SECONDS", "30")),
+}
+_preflight_lock = threading.RLock()
+_preflight_result: dict[str, Any] | None = None
+
+
+def _clear_mlx_cache() -> None:
+    try:
+        import mlx.core as mx
+        if hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+    except Exception:
+        pass
+    gc.collect()
+
+
+def _touch_runtime() -> None:
+    with _runtime_lock:
+        _runtime["lastActiveAt"] = time.monotonic()
+
+
+def _stream_started() -> None:
+    with _runtime_lock:
+        _runtime["activeStreams"] = int(_runtime.get("activeStreams") or 0) + 1
+        _runtime["lastActiveAt"] = time.monotonic()
+
+
+def _stream_finished() -> None:
+    with _runtime_lock:
+        _runtime["activeStreams"] = max(0, int(_runtime.get("activeStreams") or 0) - 1)
+        _runtime["lastActiveAt"] = time.monotonic()
+
+
+def _summarize_preflight(stderr: str, stdout: str, returncode: int) -> str:
+    combined = "\n".join(part for part in [stderr.strip(), stdout.strip()] if part)
+    for line in combined.splitlines():
+        if "NSRangeException" in line or "libmlx" in line or "Metal" in line:
+            return f"MLX native preflight failed with exit code {returncode}: {line.strip()}"
+    if combined:
+        tail = combined.splitlines()[-1].strip()
+        return f"MLX native preflight failed with exit code {returncode}: {tail}"
+    return f"MLX native preflight failed with exit code {returncode}."
+
+
+def _run_mlx_preflight() -> dict[str, Any]:
+    global _preflight_result
+    with _preflight_lock:
+        if _preflight_result is not None:
+            return _preflight_result
+
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", "import mlx.core as mx; print('mlx ok')"],
+                cwd=os.getcwd(),
+                env=os.environ.copy(),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if completed.returncode == 0:
+                _preflight_result = {
+                    "ok": True,
+                    "message": "MLX native runtime imported successfully.",
+                }
+            else:
+                _preflight_result = {
+                    "ok": False,
+                    "code": "mlx_preflight_failed",
+                    "message": _summarize_preflight(completed.stderr, completed.stdout, completed.returncode),
+                }
+        except subprocess.TimeoutExpired:
+            _preflight_result = {
+                "ok": False,
+                "code": "mlx_preflight_timeout",
+                "message": "MLX native preflight timed out while importing mlx.core.",
+            }
+
+        return _preflight_result
+
+
+def _ensure_mlx_preflight() -> None:
+    result = _run_mlx_preflight()
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result)
+
+
+def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
+    if spec.backend == "vlm":
+        from mlx_vlm import VisionFeatureCache, load
+
+        model, processor = load(str(spec.path))
+        return {
+            "modelName": spec.name,
+            "backend": spec.backend,
+            "pinned": spec.pinned,
+            "model": model,
+            "processor": processor,
+            "visionCache": VisionFeatureCache(),
+        }
+
+    from mlx_lm import load
+
+    model, tokenizer = load(str(spec.path))
+    return {
+        "modelName": spec.name,
+        "backend": spec.backend,
+        "pinned": spec.pinned,
+        "model": model,
+        "tokenizer": tokenizer,
+    }
+
+
+def _load_runtime(model_name: str | None = None) -> dict[str, Any]:
+    spec = spec_for_name(model_name)
+    if not model_ready(spec):
+        raise HTTPException(status_code=409, detail={"code": "model_missing", "message": f"Download {spec.label} first."})
+    _ensure_mlx_preflight()
+
+    with _runtime_lock:
+        loaded = _runtime["loaded"]
+        if spec.name not in loaded:
+            loaded[spec.name] = _load_model_objects(spec)
+        _runtime["lastActiveAt"] = time.monotonic()
+        return loaded[spec.name]
+
+
+def _unload_runtime(model_name: str | None = None, *, include_pinned: bool = False) -> list[str]:
+    unloaded: list[str] = []
+    with _runtime_lock:
+        loaded = _runtime["loaded"]
+        names = [model_name] if model_name else list(loaded.keys())
+        for name in names:
+            runtime = loaded.get(name)
+            if not runtime:
+                continue
+            if runtime.get("pinned") and not include_pinned:
+                continue
+            unloaded.append(name)
+            del loaded[name]
+    if unloaded:
+        _clear_mlx_cache()
+    return unloaded
+
+
+def _idle_cleanup(*, min_idle_seconds: float = 0, include_pinned: bool = True) -> dict[str, Any]:
+    with _runtime_lock:
+        active_streams = int(_runtime.get("activeStreams") or 0)
+        idle_for = max(0.0, time.monotonic() - float(_runtime.get("lastActiveAt") or time.monotonic()))
+        if active_streams:
+            return {"cleaned": False, "reason": "active_streams", "activeStreams": active_streams, "idleForSeconds": idle_for}
+        if idle_for < min_idle_seconds:
+            return {"cleaned": False, "reason": "not_idle", "activeStreams": active_streams, "idleForSeconds": idle_for}
+
+    unloaded = _unload_runtime(None, include_pinned=include_pinned)
+    if not unloaded:
+        _clear_mlx_cache()
+    return {
+        "cleaned": True,
+        "unloaded": unloaded,
+        "count": len(unloaded),
+        "activeStreams": 0,
+        "idleForSeconds": idle_for,
+    }
+
+
+def _loaded_models() -> list[dict[str, Any]]:
+    with _runtime_lock:
+        return [
+            {
+                "name": runtime["modelName"],
+                "backend": runtime.get("backend"),
+                "pinned": bool(runtime.get("pinned")),
+            }
+            for runtime in _runtime["loaded"].values()
+        ]
+
+
+def _preload_pinned_models() -> None:
+    for spec in MODEL_SPECS.values():
+        if not spec.pinned or not model_ready(spec):
+            continue
+        try:
+            _load_runtime(spec.name)
+        except Exception as exc:
+            print(f"Failed to preload pinned MLX model {spec.name}: {exc}", file=sys.stderr, flush=True)
+
+
+def _start_pinned_preload() -> None:
+    thread = threading.Thread(target=_preload_pinned_models, daemon=True)
+    thread.start()
+
+
+def _idle_watchdog() -> None:
+    while True:
+        with _runtime_lock:
+            check_seconds = max(1.0, float(_runtime.get("idleCheckSeconds") or 30))
+            unload_seconds = float(_runtime.get("idleUnloadSeconds") or 0)
+        time.sleep(check_seconds)
+        if unload_seconds <= 0:
+            continue
+        try:
+            _idle_cleanup(min_idle_seconds=unload_seconds, include_pinned=True)
+        except Exception as exc:
+            print(f"MLX idle cleanup failed: {exc}", file=sys.stderr, flush=True)
+
+
+def _start_idle_watchdog() -> None:
+    thread = threading.Thread(target=_idle_watchdog, daemon=True)
+    thread.start()
+
+
+def _message_payload(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    payload: list[dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        payload.append({
+            "role": role if role in {"system", "user", "assistant"} else "user",
+            "content": content,
+        })
+    return payload
+
+
+def _generation_kwargs(options: dict[str, Any]) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "max_tokens": int(options.get("max_tokens") or options.get("num_predict") or 1024),
+        "temperature": float(options.get("temperature") or 0.0),
+        "top_p": float(options.get("top_p") or 1.0),
+    }
+    if options.get("top_k") is not None:
+        kwargs["top_k"] = int(options["top_k"])
+    if options.get("min_p") is not None:
+        kwargs["min_p"] = float(options["min_p"])
+    if options.get("repetition_penalty") is not None:
+        kwargs["repetition_penalty"] = float(options["repetition_penalty"])
+    if options.get("seed") is not None:
+        kwargs["seed"] = int(options["seed"])
+    kwargs["enable_thinking"] = bool(options.get("enable_thinking", False))
+    if options.get("thinking_budget") is not None:
+        kwargs["thinking_budget"] = int(options["thinking_budget"])
+    return kwargs
+
+
+def _lm_generation_kwargs(options: dict[str, Any]) -> dict[str, Any]:
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+    kwargs: dict[str, Any] = {
+        "max_tokens": int(options.get("max_tokens") or options.get("num_predict") or 1024),
+        "sampler": make_sampler(
+            temp=float(options.get("temperature") or 0.0),
+            top_p=float(options.get("top_p") or 0.0),
+            min_p=float(options.get("min_p") or 0.0),
+            top_k=int(options.get("top_k") or 0),
+        ),
+    }
+    if options.get("repetition_penalty") is not None:
+        kwargs["logits_processors"] = make_logits_processors(
+            repetition_penalty=float(options["repetition_penalty"]),
+        )
+    if options.get("max_kv_size") is not None:
+        kwargs["max_kv_size"] = int(options["max_kv_size"])
+    if options.get("kv_bits") is not None:
+        kwargs["kv_bits"] = int(options["kv_bits"])
+    return kwargs
+
+
+def _chat_template_kwargs(options: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enable_thinking": bool(options.get("enable_thinking", False)),
+    }
+
+
+def _apply_lm_chat_template(tokenizer: Any, prompt: Any, options: dict[str, Any]) -> str:
+    if not isinstance(prompt, list):
+        return str(prompt)
+    if getattr(tokenizer, "chat_template", None) is not None:
+        try:
+            return tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                **_chat_template_kwargs(options),
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+    return "\n".join(f"{item['role'].capitalize()}: {item['content']}" for item in prompt) + "\nAssistant:"
+
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
+    preflight = _run_mlx_preflight()
+    loaded = _loaded_models()
+    with _runtime_lock:
+        active_streams = int(_runtime.get("activeStreams") or 0)
+        idle_for = max(0.0, time.monotonic() - float(_runtime.get("lastActiveAt") or time.monotonic()))
+    return {
+        "ok": bool(preflight.get("ok")),
+        "name": "naow-mlx-runner",
+        "version": "0.1.0",
+        "modelLoaded": bool(loaded),
+        "modelName": loaded[0]["name"] if len(loaded) == 1 else None,
+        "loadedModels": loaded,
+        "activeStreams": active_streams,
+        "idleForSeconds": idle_for,
+        "modelsDir": str(MODEL_DIR),
+        "preflight": preflight,
+    }
+
+
+@app.get("/models/status")
+async def models_status() -> dict[str, Any]:
+    payload = download_status()
+    payload["models"] = [model_payload(spec) for spec in MODEL_SPECS.values()]
+    return payload
+
+
+@app.get("/runtime/preflight")
+async def runtime_preflight() -> dict[str, Any]:
+    return _run_mlx_preflight()
+
+
+@app.post("/models/download")
+async def download_model(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return start_download(str((payload or {}).get("modelKey") or DEFAULT_MODEL.key))
+
+
+@app.get("/models/download/status")
+async def model_download_status() -> dict[str, Any]:
+    return download_status()
+
+
+@app.post("/models/load")
+async def load_model(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    runtime = _load_runtime(str((payload or {}).get("model") or DEFAULT_MODEL.name))
+    return {"loaded": True, "model": runtime["modelName"]}
+
+
+@app.post("/models/unload")
+async def unload_model(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    include_pinned = bool((payload or {}).get("includePinned", False))
+    model_name = (payload or {}).get("model")
+    unloaded = _unload_runtime(str(model_name) if model_name else None, include_pinned=include_pinned)
+    return {"unloaded": unloaded, "count": len(unloaded), "keptLoaded": _loaded_models()}
+
+
+@app.post("/runtime/idle-cleanup")
+async def runtime_idle_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    include_pinned = bool((payload or {}).get("includePinned", True))
+    min_idle_seconds = float((payload or {}).get("minIdleSeconds", 0))
+    return _idle_cleanup(min_idle_seconds=min_idle_seconds, include_pinned=include_pinned)
+
+
+@app.post("/runtime/residency")
+async def set_residency(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    value = str((payload or {}).get("residency") or "always_hot")
+    if value not in {"always_hot", "warm_idle", "unload_after_reply"}:
+        raise HTTPException(status_code=400, detail={"code": "invalid_residency", "message": "Invalid residency mode."})
+    with _runtime_lock:
+        _runtime["residency"] = value
+        _runtime["lastActiveAt"] = time.monotonic()
+    return {"residency": value}
+
+
+@app.post("/chat/stream")
+async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
+    runtime = _load_runtime(str(payload.get("model") or DEFAULT_MODEL.name))
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    images = [str(item) for item in payload.get("images", []) if str(item).strip()]
+    prompt_messages = _message_payload(messages)
+    prompt = prompt_messages or str(payload.get("prompt") or "")
+
+    def generate_events():
+        _stream_started()
+        try:
+            if runtime["backend"] == "vlm":
+                from mlx_vlm import stream_generate
+                from mlx_vlm.prompt_utils import apply_chat_template
+
+                model = runtime["model"]
+                processor = runtime["processor"]
+                templated_prompt = apply_chat_template(
+                    processor,
+                    model.config,
+                    prompt,
+                    num_images=len(images),
+                    **_chat_template_kwargs(options),
+                )
+                kwargs = _generation_kwargs(options)
+                if runtime.get("visionCache") is not None:
+                    kwargs["vision_cache"] = runtime["visionCache"]
+                for chunk in stream_generate(model, processor, templated_prompt, image=images or None, **kwargs):
+                    text = getattr(chunk, "text", "")
+                    if text:
+                        yield json.dumps({"type": "token", "delta": text}) + "\n"
+            else:
+                from mlx_lm import stream_generate
+
+                if images:
+                    raise ValueError(f"{runtime['modelName']} does not support image inputs.")
+                tokenizer = runtime["tokenizer"]
+                templated_prompt = _apply_lm_chat_template(tokenizer, prompt, options)
+                kwargs = _lm_generation_kwargs(options)
+                for chunk in stream_generate(runtime["model"], tokenizer, templated_prompt, **kwargs):
+                    text = getattr(chunk, "text", "")
+                    if text:
+                        yield json.dumps({"type": "token", "delta": text}) + "\n"
+            yield json.dumps({"type": "done", "doneReason": "stop"}) + "\n"
+        except Exception as exc:
+            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+        finally:
+            residency = str(_runtime.get("residency") or "always_hot")
+            if residency == "unload_after_reply" and not runtime.get("pinned"):
+                _unload_runtime(runtime["modelName"])
+            elif residency == "warm_idle":
+                with _runtime_lock:
+                    if runtime.get("visionCache") is not None and not runtime.get("pinned"):
+                        runtime["visionCache"] = None
+                _clear_mlx_cache()
+            _stream_finished()
+
+    return StreamingResponse(generate_events(), media_type="application/x-ndjson")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default=os.environ.get("NAOW_MLX_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("NAOW_MLX_PORT", "5055")))
+    args = parser.parse_args()
+    ensure_dirs()
+    import uvicorn
+    _start_pinned_preload()
+    _start_idle_watchdog()
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

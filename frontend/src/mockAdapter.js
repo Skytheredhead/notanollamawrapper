@@ -32,6 +32,48 @@ const mockAdapter = {
     return [...MODELS]
   },
 
+  async unloadModels() {
+    await sleep(120)
+    return { unloaded: [...MODELS], count: MODELS.length }
+  },
+
+  async stats(model = MODELS[0]) {
+    await sleep(30)
+    return {
+      timestamp: new Date().toISOString(),
+      backend: {
+        id: model.includes('/') ? 'mlx' : 'ollama',
+        label: model.includes('/') ? 'MLX' : 'Ollama',
+      },
+      cpu: { usagePercent: 8.4 },
+      ram: { rssBytes: 640 * 1024 * 1024 },
+      gpu: { available: true, usagePercent: 31, source: 'mock' },
+      process: { pid: 0, processCount: 1, pids: [] },
+    }
+  },
+
+  async mlxModelsStatus() {
+    return {
+      status: 'done',
+      pct: 100,
+      step: 'models ready',
+      modelsDir: 'mock',
+      missing: [],
+      promptState: 'complete',
+      models: [{
+        key: 'qwen3_5_9b_mlx_4bit',
+        name: 'mlx-community/Qwen3.5-9B-MLX-4bit',
+        label: 'Qwen3.5 9B MLX 4-bit',
+        ready: true,
+      }],
+    }
+  },
+
+  async mlxPreflight() { return { ok: true, message: 'MLX mock ready.' } },
+  async startMlxModelDownload() { return this.mlxModelsStatus() },
+  async mlxModelDownloadStatus() { return this.mlxModelsStatus() },
+  async openMlxModelsFolder() { return { opened: true, path: 'mock' } },
+
   async listChats() {
     await sleep(40)
     return [...chats]
@@ -52,7 +94,7 @@ const mockAdapter = {
     return { chat, messages: [...(msgs[id] ?? [])] }
   },
 
-  sendMessage(chatId, content, model, onToken, onDone, onError) {
+  sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError) {
     const ctrl = { aborted: false, abort() { this.aborted = true } }
 
     if (!msgs[chatId]) msgs[chatId] = []
@@ -83,7 +125,7 @@ const mockAdapter = {
 
   stopGeneration(ctrl) { ctrl?.abort?.() },
 
-  regenerate(chatId, model, onToken, onDone, onError) {
+  regenerate(chatId, model, options, webSearch, onToken, onDone, onError) {
     const chatMsgs = msgs[chatId] ?? []
     if (chatMsgs.length > 0 && chatMsgs[chatMsgs.length - 1].role === 'assistant') {
       msgs[chatId] = chatMsgs.slice(0, -1)
