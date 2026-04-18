@@ -1,11 +1,15 @@
-# naow
+# naow - not another ollama wrapper
 
-Yet another local chat app except this one's better (cause i made it)
+Optimized for speed and doesn't rely on Ollama or any other app behind the scenes.
 
 ## features
 - Automatic model downlaods (courtesy of my other project, Stemsplat)
 - Cool UI
 - Nerd numbers for nerds
+- Local web search with a native Python SearXNG sidecar, no relying on Docker or Ollama
+- Keeps pinned models hot cause I have the ram and I don't like waiting
+- Built-in tools so you can time your mile - unlike chatgpt/claude/grok/everyone else
+- Image chat support for compatible models
 
 ## Requirements
 
