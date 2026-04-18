@@ -66,6 +66,7 @@ def main() -> int:
         "fastapi",
         "uvicorn[standard]",
         "huggingface_hub",
+        "requests",
         "pillow",
         "torch",
         "torchvision",

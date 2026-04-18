@@ -92,6 +92,38 @@ function formatPercent(value) {
   return `${number.toFixed(number > 0 && number < 10 ? 1 : 0)}%`
 }
 
+function formatDownloadPercent(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '--'
+  return `${number.toFixed(number > 0 && number < 99.95 ? 1 : 0)}%`
+}
+
+function formatDownloadRate(bytesPerSecond) {
+  const value = Number(bytesPerSecond || 0)
+  return value > 0 ? `${formatBytes(value)}/s` : '--'
+}
+
+function formatEta(seconds) {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  if (value < 60) return `${Math.round(value)}s left`
+  const minutes = Math.floor(value / 60)
+  const remainder = Math.round(value % 60)
+  return `${minutes}m ${String(remainder).padStart(2, '0')}s left`
+}
+
+function downloadProgressText(status) {
+  const pct = Math.max(0, Math.min(100, Number(status?.pct || 0)))
+  const rateText = formatDownloadRate(status?.downloadRateBytesPerSec)
+  const etaText = formatEta(status?.etaSeconds)
+  return [
+    formatDownloadPercent(pct),
+    `${formatBytes(status?.downloadedBytes)} / ${formatBytes(status?.totalBytes)}`,
+    rateText !== '--' ? rateText : '',
+    etaText,
+  ].filter(Boolean).join(' · ')
+}
+
 function metricsText(metrics, now, streaming = false) {
   if (!metrics) return ''
   if (Number.isFinite(metrics.generationMs)) {
@@ -501,14 +533,14 @@ function SettingsModelDownloads({ open }) {
     let cancelled = false
     async function load() {
       try {
-        const next = await adapter.mlxModelsStatus()
+        const next = await (adapter.mlxModelDownloadStatus?.() ?? adapter.mlxModelsStatus())
         if (!cancelled) setStatus(next)
       } catch {
         if (!cancelled) setStatus({ status: 'unavailable', error: 'MLX runner is not ready.' })
       }
     }
     load()
-    const timer = setInterval(load, status?.status === 'downloading' || status?.status === 'retrying' ? 700 : 4000)
+    const timer = setInterval(load, status?.status === 'downloading' || status?.status === 'retrying' ? 500 : 4000)
     return () => {
       cancelled = true
       clearInterval(timer)
@@ -546,6 +578,7 @@ function SettingsModelDownloads({ open }) {
         <div className="settingsDownloadProgress">
           <small>{currentLabel}</small>
           <div className="downloadBar"><span style={{ width: `${pct}%` }} /></div>
+          <small>{downloadProgressText(status)}</small>
         </div>
       )}
       {!downloading && missingModels.map((model) => (
@@ -742,28 +775,37 @@ function ModelDownloadToast() {
 
   useEffect(() => {
     let cancelled = false
-    let timer = null
+    let timer = 0
     async function load() {
       try {
         const [next, runtime] = await Promise.all([
-          adapter.mlxModelsStatus(),
+          adapter.mlxModelDownloadStatus?.() ?? adapter.mlxModelsStatus(),
           adapter.mlxPreflight?.().catch((error) => ({ ok: false, message: error.message })),
         ])
         if (!cancelled) {
           setStatus(next)
           setPreflight(runtime)
         }
+        return { next, runtime }
       } catch {
         if (!cancelled) setStatus({ status: 'unavailable', error: 'MLX runner is not ready.' })
+        return { next: { status: 'unavailable' }, runtime: preflight }
       }
     }
-    load()
-    if (shouldPollModelDownloadStatus(status, preflight, dismissed)) {
-      timer = setInterval(load, status?.status === 'downloading' || status?.status === 'retrying' ? 700 : 3500)
+
+    async function poll() {
+      const { next, runtime } = await load()
+      if (cancelled) return
+      if (shouldPollModelDownloadStatus(next, runtime, dismissed)) {
+        const live = next?.status === 'downloading' || next?.status === 'retrying'
+        timer = window.setTimeout(poll, live ? 500 : 3500)
+      }
     }
+
+    poll()
     return () => {
       cancelled = true
-      if (timer) clearInterval(timer)
+      if (timer) window.clearTimeout(timer)
     }
   }, [dismissed, preflight?.ok, status?.status, status?.missing?.join('|')])
 
@@ -817,7 +859,7 @@ function ModelDownloadToast() {
       {downloading && (
         <div className="downloadProgress">
           <div className="downloadBar"><span style={{ width: `${pct}%` }} /></div>
-          <small>{pct}% · {formatBytes(status.downloadedBytes)} / {formatBytes(status.totalBytes)}{status.etaSeconds ? ` · ${status.etaSeconds}s left` : ''}</small>
+          <small>{downloadProgressText(status)}</small>
         </div>
       )}
       <div className="downloadActions">

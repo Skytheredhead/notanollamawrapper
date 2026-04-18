@@ -93,7 +93,10 @@ const realAdapter = {
   },
 
   async mlxModelsStatus() {
-    const r = await fetch(`${BASE}/mlx/models/status`)
+    const r = await fetch(`${BASE}/mlx/models/status`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    })
     if (!r.ok) throw new Error(`mlxModelsStatus: ${r.status}`)
     return r.json()
   },
@@ -109,7 +112,10 @@ const realAdapter = {
   },
 
   async mlxModelDownloadStatus() {
-    const r = await fetch(`${BASE}/mlx/models/download/status`)
+    const r = await fetch(`${BASE}/mlx/models/download/status`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    })
     if (!r.ok) throw new Error(`mlxModelDownloadStatus: ${r.status}`)
     return r.json()
   },

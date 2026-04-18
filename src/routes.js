@@ -753,6 +753,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     if (!ollama.mlx) {
       return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
     }
+    reply.header('Cache-Control', 'no-store');
     try {
       return await ollama.mlx.status();
     } catch (error) {
@@ -786,6 +787,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     if (!ollama.mlx) {
       return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
     }
+    reply.header('Cache-Control', 'no-store');
     try {
       return await ollama.mlx.modelDownloadStatus();
     } catch (error) {

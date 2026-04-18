@@ -25,11 +25,13 @@ _state: dict[str, Any] = {
     "retryCount": 0,
     "error": "",
     "promptState": "pending",
+    "updatedAt": time.time(),
 }
 
 
 def _set(**patch: Any) -> None:
     with _lock:
+        patch["updatedAt"] = time.time()
         _state.update(patch)
 
 

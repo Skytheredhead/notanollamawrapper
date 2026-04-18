@@ -64,10 +64,10 @@ def main():
     copy_settings(settings, template)
 
     if not source.exists():
-      run(["git", "clone", "--depth", "1", REPO_URL, str(source)])
+        run(["git", "clone", "--depth", "1", REPO_URL, str(source)])
     else:
-      run(["git", "fetch", "--depth", "1", "origin"], cwd=source)
-      run(["git", "reset", "--hard", "origin/master"], cwd=source)
+        run(["git", "fetch", "--depth", "1", "origin"], cwd=source)
+        run(["git", "reset", "--hard", "origin/master"], cwd=source)
 
     if not venv_python.exists():
         run([args.python, "-m", "venv", str(venv)])
