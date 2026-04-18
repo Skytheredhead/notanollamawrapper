@@ -17,7 +17,7 @@ export function useChat() {
     queuedMessages, enqueueMessage, shiftQueuedMessage,
     input, setInput,
     pendingAttachments, clearPendingAttachments,
-    timers, stopwatches, addToolActivity, applyClientToolAction,
+    timers, stopwatches, streamToolCards, addStreamToolCard, clearStreamToolCards, applyClientToolAction,
     setError,
   } = useStore()
 
@@ -29,10 +29,83 @@ export function useChat() {
     },
   })
 
-  const handleToolEvent = (event) => {
-    addToolActivity(event)
+  const fallbackToolDisplay = (event) => ({
+    title: event.name || event.event || 'Tool',
+    summary: event.message || event.source || event.skipped || 'Working',
+  })
+
+  const toolEventToCard = (event) => {
+    if (event.event === 'web_search') {
+      return {
+        toolCallId: event.toolCallId || `web_search_${Date.now()}`,
+        name: 'web_search',
+        toolName: 'web_search',
+        status: event.used ? 'complete' : 'skipped',
+        startedAt: event.startedAt || null,
+        completedAt: Date.now(),
+        elapsedMs: event.elapsedMs,
+        cacheHit: event.cacheHit,
+        source: event.provider ? `Local ${event.provider} search` : 'Local web search',
+        display: event.display || {
+          title: 'Web Search',
+          summary: event.message || event.skipped || `${event.resultCount || 0} results`,
+        },
+      }
+    }
+    if (event.event === 'tool_call_start') {
+      return {
+        toolCallId: event.toolCallId,
+        name: event.name,
+        toolName: event.name,
+        status: 'running',
+        startedAt: event.startedAt || Date.now(),
+        argsPreview: event.argsPreview || '',
+        display: event.display || fallbackToolDisplay(event),
+      }
+    }
+    if (event.event === 'tool_call_result') {
+      return {
+        toolCallId: event.toolCallId,
+        name: event.name,
+        toolName: event.name,
+        status: 'complete',
+        completedAt: Date.now(),
+        elapsedMs: event.elapsedMs,
+        cacheHit: event.cacheHit,
+        source: event.source,
+        display: event.display || fallbackToolDisplay(event),
+      }
+    }
+    if (event.event === 'tool_call_error') {
+      return {
+        toolCallId: event.toolCallId,
+        name: event.name,
+        toolName: event.name,
+        status: 'error',
+        completedAt: Date.now(),
+        elapsedMs: event.elapsedMs,
+        error: event.message,
+        display: event.display || fallbackToolDisplay(event),
+      }
+    }
     if (event.event === 'client_tool_action' && event.action) {
-      applyClientToolAction(event.action)
+      return {
+        ...event.action,
+        toolCallId: event.toolCallId,
+        name: event.name,
+        toolName: event.name,
+        action: event.action.action,
+      }
+    }
+    return null
+  }
+
+  const handleToolEvent = (event) => {
+    const card = toolEventToCard(event)
+    if (card) addStreamToolCard(card)
+    if (event.event === 'client_tool_action' && event.action) {
+      const action = { ...event.action, toolCallId: event.toolCallId, toolName: event.name }
+      applyClientToolAction(action)
     }
   }
 
@@ -113,6 +186,7 @@ export function useChat() {
     })
     setIsStreaming(true)
     setStreamingContent('')
+    clearStreamToolCards()
     startStreamMetrics()
 
     const ctrl = adapter.sendMessage(
@@ -123,10 +197,11 @@ export function useChat() {
         if (result?.aborted) return
         const finalState = useStore.getState()
         appendMessage(result?.message
-          ? { ...result.message, metrics: result.message.metrics || result.message.metadata?.metrics || finalState.streamMetrics }
-          : { id: `a${Date.now()}`, chatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics })
+          ? { ...result.message, metrics: result.message.metrics || result.message.metadata?.metrics || finalState.streamMetrics, toolCards: finalState.streamToolCards }
+          : { id: `a${Date.now()}`, chatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics, toolCards: finalState.streamToolCards })
         setStreamingContent('')
         setStreamController(null)
+        clearStreamToolCards()
         clearStreamMetrics()
         const cs = await adapter.listChats()
         setChats(cs)
@@ -152,6 +227,7 @@ export function useChat() {
         setIsStreaming(false)
         setStreamingContent('')
         setStreamController(null)
+        clearStreamToolCards()
         clearStreamMetrics()
         setError(err.message)
         appendMessage({
@@ -187,12 +263,13 @@ export function useChat() {
   }, [startGeneration])
 
   const stopGeneration = useCallback(() => {
-    const { streamController: ctrl, streamingContent: content, streamMetrics: metrics, currentChatId: chatId } = useStore.getState()
+    const { streamController: ctrl, streamingContent: content, streamMetrics: metrics, streamToolCards: cards, currentChatId: chatId } = useStore.getState()
     adapter.stopGeneration(ctrl)
-    if (content.trim()) appendMessage({ id: `a${Date.now()}`, chatId, role: 'assistant', content, metrics })
+    if (content.trim()) appendMessage({ id: `a${Date.now()}`, chatId, role: 'assistant', content, metrics, toolCards: cards })
     setStreamingContent('')
     setIsStreaming(false)
     setStreamController(null)
+    clearStreamToolCards()
     clearStreamMetrics()
     window.setTimeout(() => {
       if (!chatId) return
@@ -211,6 +288,7 @@ export function useChat() {
 
     setIsStreaming(true)
     setStreamingContent('')
+    clearStreamToolCards()
     startStreamMetrics()
     const ctrl = adapter.regenerate(
       state.currentChatId, state.selectedModel, { num_ctx: state.contextSize }, state.webSearchEnabled,
@@ -218,11 +296,12 @@ export function useChat() {
       (result) => {
         const finalState = useStore.getState()
         appendMessage(result?.message
-          ? { ...result.message, metrics: result.message.metrics || result.message.metadata?.metrics || finalState.streamMetrics }
-          : { id: `a${Date.now()}`, chatId: state.currentChatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics })
+          ? { ...result.message, metrics: result.message.metrics || result.message.metadata?.metrics || finalState.streamMetrics, toolCards: finalState.streamToolCards }
+          : { id: `a${Date.now()}`, chatId: state.currentChatId, role: 'assistant', content: finalState.streamingContent, metrics: finalState.streamMetrics, toolCards: finalState.streamToolCards })
         setStreamingContent('')
         setIsStreaming(false)
         setStreamController(null)
+        clearStreamToolCards()
         clearStreamMetrics()
         adapter.loadChat(state.currentChatId)
           .then(({ messages: ms }) => setMessagesForChat(state.currentChatId, ms ?? []))
@@ -232,6 +311,7 @@ export function useChat() {
         setIsStreaming(false)
         setStreamingContent('')
         setStreamController(null)
+        clearStreamToolCards()
         clearStreamMetrics()
         setError(err.message)
         appendMessage({
@@ -264,7 +344,7 @@ export function useChat() {
     modelResidency, pendingAttachments, timers, stopwatches,
     chats, currentChatId,
     messages, streamingContent, isStreaming,
-    streamMetrics, queuedMessages,
+    streamMetrics, streamToolCards, queuedMessages,
     input, setInput,
     loadModels, loadChats, selectChat, newChat, unloadModels,
     sendMessage, stopGeneration, regenerate, handleKeyDown,

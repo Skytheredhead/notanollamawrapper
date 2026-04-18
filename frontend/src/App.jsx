@@ -266,14 +266,12 @@ function BackendStats({ selectedModel, active }) {
     }
   }, [stats])
 
-  const backend = stats?.backend?.label || '--'
   const cpu = formatPercent(cpuDisplayValue)
   const ram = formatBytes(stats?.ram?.rssBytes)
   const gpu = stats?.gpu?.available ? formatPercent(stats.gpu.usagePercent) : '--'
 
   return (
     <div className="backendStats" aria-live="polite">
-      <span className="statItem"><strong>Backend</strong> <span className="backendValue">{backend}</span></span>
       <span className="statItem"><strong>CPU</strong> <AnimatedStatValue value={cpu} numericValue={cpuDisplayValue} width="5.5ch" /></span>
       <span className="statItem"><strong>RAM</strong> <AnimatedStatValue value={ram} numericValue={stats?.ram?.rssBytes} width="9ch" /></span>
       <span className="statItem"><strong>GPU</strong> <AnimatedStatValue value={gpu} numericValue={stats?.gpu?.usagePercent} width="5.5ch" /></span>
@@ -291,42 +289,118 @@ function formatDuration(ms) {
   return `${s}s`
 }
 
-function ToolShelf({ now }) {
+function normalizeToolCard(card) {
+  const action = card?.action && typeof card.action === 'object' ? card.action : card
+  const display = card?.display || action?.display || null
+  if (!display && !action?.action && !card?.name && !card?.toolName) return null
+  return {
+    ...card,
+    ...action,
+    toolCallId: action.toolCallId || card.toolCallId || null,
+    toolName: action.toolName || card.name || card.toolName || action.action,
+    name: card.name || action.name || card.toolName || action.toolName || action.action,
+    status: card.status || action.status || null,
+    display,
+    at: Number(card.at || action.at || 0) || null,
+  }
+}
+
+function fallbackToolTitle(card) {
+  const name = card.name || card.toolName || card.action || 'Tool'
+  return String(name).split('_').map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(' ')
+}
+
+function ToolCard({ card, now, messageAt }) {
   const timers = useStore((s) => s.timers)
   const stopwatches = useStore((s) => s.stopwatches)
-  const activities = useStore((s) => s.toolActivities)
-  const activeTimers = timers.filter((timer) => timer.status === 'active').slice(-3)
-  const activeStopwatches = stopwatches.filter((watch) => watch.running).slice(-3)
-  const recent = activities.slice(0, 2)
-  if (!activeTimers.length && !activeStopwatches.length && !recent.length) return null
+  const display = card.display || {}
+  const actionName = card.action || card.name || card.toolName
+  let title = display.title || fallbackToolTitle(card)
+  let summary = display.summary || ''
+  let status = card.status || ''
+  let done = status === 'complete'
+
+  if (actionName === 'timer_start') {
+    const local = card.toolCallId ? timers.find((timer) => timer.toolCallId === card.toolCallId) : null
+    const durationMs = Math.max(1, Number(card.durationMs || local?.durationMs || 0))
+    const startedAt = local?.createdAt || card.startedAt || card.at || messageAt
+    const targetAt = local?.targetAt || startedAt + durationMs
+    const remaining = targetAt - now
+    const cancelled = local?.status === 'cancelled'
+    done = !cancelled && remaining <= 0
+    title = card.label || local?.label || title || 'Timer'
+    summary = cancelled ? 'cancelled' : done ? 'done' : formatDuration(remaining)
+    status = cancelled ? 'cancelled' : done ? 'done' : 'running'
+  }
+
+  if (actionName === 'stopwatch_start') {
+    const local = card.toolCallId ? stopwatches.find((watch) => watch.toolCallId === card.toolCallId) : null
+    const startedAt = local?.startedAt || card.startedAt || card.at || messageAt
+    const elapsed = local
+      ? local.elapsedMs + (local.running ? now - local.startedAt : 0)
+      : Math.max(0, now - startedAt)
+    title = card.label || local?.label || title || 'Stopwatch'
+    summary = formatDuration(elapsed)
+    status = local?.running === false ? 'stopped' : 'running'
+  }
+
+  const rows = Array.isArray(display.rows) ? display.rows.filter((row) => row?.label && row?.value != null) : []
+  const links = Array.isArray(display.links) ? display.links.filter((link) => link?.url) : []
+  const items = Array.isArray(display.items) ? display.items.filter(Boolean) : []
 
   return (
-    <div className="toolShelf" aria-live="polite">
-      {activeTimers.map((timer) => {
-        const remaining = timer.targetAt - now
-        const done = remaining <= 0
-        return (
-          <div className={`toolChip ${done ? 'isDone' : ''}`} key={timer.id}>
-            <strong>{done ? 'Timer done' : timer.label}</strong>
-            <span>{done ? 'Ready' : formatDuration(remaining)}</span>
-          </div>
-        )
-      })}
-      {activeStopwatches.map((watch) => (
-        <div className="toolChip" key={watch.id}>
-          <strong>{watch.label}</strong>
-          <span>{formatDuration(watch.elapsedMs + now - watch.startedAt)}</span>
+    <div className={`messageToolCard ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''} ${status === 'error' ? 'isError' : ''}`}>
+      <div className="toolCardHeader">
+        <strong>{title}</strong>
+        {status && <span className="toolCardStatus">{status}</span>}
+      </div>
+      {summary && <span className="messageToolCardSummary">{summary}</span>}
+      {display.color && <span className="toolColorSwatch" style={{ backgroundColor: display.color }} aria-label={display.color} />}
+      {rows.length > 0 && (
+        <dl className="toolCardRows">
+          {rows.slice(0, 6).map((row, index) => (
+            <React.Fragment key={`${row.label}-${index}`}>
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      )}
+      {links.length > 0 && (
+        <div className="toolCardLinks">
+          {links.slice(0, 3).map((link, index) => (
+            <a href={link.url} target="_blank" rel="noreferrer" key={`${link.url}-${index}`}>{link.title || link.url}</a>
+          ))}
         </div>
-      ))}
-      {recent.map((activity) => (
-        <div className="toolChip isActivity" key={activity.id}>
-          <strong>{activity.event === 'web_search' ? 'web search' : activity.name || activity.event || 'Tool'}</strong>
-          <span>
-            {activity.event === 'web_search'
-              ? activity.used ? `read ${activity.fetchedCount || 0}` : activity.skipped || 'skipped'
-              : activity.event === 'tool_call_error' ? 'failed' : activity.event === 'tool_call_result' ? 'done' : 'running'}
-          </span>
-        </div>
+      )}
+      {items.length > 0 && (
+        <ul className="toolCardItems">
+          {items.slice(0, 5).map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+        </ul>
+      )}
+      {display.code && <pre className="toolCardCode">{display.code}</pre>}
+      {card.error && status === 'error' && <span className="toolCardError">{card.error}</span>}
+    </div>
+  )
+}
+
+function MessageToolCards({ message, toolCards = [], now }) {
+  const rawCards = toolCards.length
+    ? toolCards
+    : (message?.toolCards || message?.metrics?.toolCards || message?.metadata?.metrics?.toolCards || message?.metrics?.toolActions || message?.metadata?.metrics?.toolActions || [])
+  const cards = rawCards
+    .map(normalizeToolCard)
+    .filter(Boolean)
+    .slice(0, 8)
+
+  if (!cards.length) return null
+
+  const messageAt = Date.parse(message?.completedAt || message?.createdAt || '') || Date.now()
+
+  return (
+    <div className="messageToolCards" aria-live="polite">
+      {cards.map((card, index) => (
+        <ToolCard card={card} now={now} messageAt={messageAt} key={card.toolCallId || card.id || `${card.name || card.action}-${index}`} />
       ))}
     </div>
   )
@@ -732,7 +806,7 @@ function shouldPollModelDownloadStatus(status, preflight, dismissed) {
   return runtimeBlocked || needsInitialModel || missingModels.length > 0 || ['error', 'unavailable'].includes(status?.status)
 }
 
-function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, isStreaming, now, userName }) {
+function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, streamToolCards, isStreaming, now, wallNow, userName }) {
   const bottomRef = useRef(null)
   const emptyPrompt = promptForChat(chatId, userName)
   useEffect(() => {
@@ -752,12 +826,14 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, i
           <section key={message.id} className={`message ${message.role} ${message.status === 'error' ? 'isError' : ''}`}>
             <AttachmentStrip attachments={message.attachments} />
             <MessageContent content={message.content || message.error || ''} />
+            {message.role === 'assistant' && <MessageToolCards message={message} now={wallNow} />}
             {message.role === 'assistant' && <MessageMetrics metrics={message.metrics} now={now} />}
           </section>
         ))}
         {active && isStreaming && (
           <section className="message assistant isStreaming">
             <MessageContent content={streamingContent || ' '} />
+            <MessageToolCards message={{ createdAt: new Date().toISOString() }} toolCards={streamToolCards} now={wallNow} />
             <MessageMetrics metrics={streamMetrics} now={now} streaming />
           </section>
         )}
@@ -877,6 +953,7 @@ export default function App() {
   const {
     models, selectedModel, setSelectedModel,
     chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, queuedMessages,
+    streamToolCards,
     input, setInput, pendingAttachments, loadModels, loadChats, selectChat, newChat, unloadModels, sendMessage, stopGeneration, handleKeyDown,
   } = useChat()
   const addPendingAttachments = useStore((s) => s.addPendingAttachments)
@@ -943,11 +1020,6 @@ export default function App() {
   const currentIndex = Math.max(0, orderedChats.findIndex((chat) => chat.id === currentChatId))
   const currentChat = orderedChats[currentIndex]
 
-  const moveTo = (index) => {
-    const next = orderedChats[Math.max(0, Math.min(orderedChats.length - 1, index))]
-    if (next && next.id !== currentChatId) selectChat(next.id)
-  }
-
   const openNewThread = (force = false) => {
     if (isStreaming) return
     if (!force && currentChat && messages.length === 0) {
@@ -1005,26 +1077,20 @@ export default function App() {
             messages={messages}
             streamingContent={streamingContent}
             streamMetrics={streamMetrics}
+            streamToolCards={streamToolCards}
             isStreaming={isStreaming}
             now={now}
+            wallNow={wallNow}
             userName={userName}
           />
         </div>
         <button className="newThreadButton" onClick={() => openNewThread()} aria-label="New thread">
           <span>+</span>
         </button>
-        {orderedChats.length > 1 && (
-          <div className="chatDots">
-            {orderedChats.map((chat, index) => (
-              <button key={chat.id} className={index === currentIndex ? 'isCurrent' : ''} onClick={() => moveTo(index)} aria-label={`Open ${chat.title}`} />
-            ))}
-          </div>
-        )}
       </main>
 
       <footer className="composer">
         <BackendStats selectedModel={selectedModel} active={isStreaming} />
-        <ToolShelf now={wallNow} />
         {currentQueue.length > 0 && (
           <div className="queueShelf" aria-live="polite">
             <span className="queueLabel">{currentQueue.length === 1 ? 'Queued next' : `${currentQueue.length} queued`}</span>

@@ -12,6 +12,7 @@ import { readSystemStats } from './system-stats.js';
 import { prependToolsContext } from './tool-context.js';
 import { formatSearchResultsForContext } from './web-search.js';
 import {
+  buildToolDisplay,
   createToolRuntime,
   executeTool,
   formatToolContext,
@@ -241,6 +242,8 @@ function buildMessageMetadata({
   firstTokenAt = null,
   tokenCount = 0,
   searchContext = null,
+  toolActions = [],
+  toolCards = [],
   doneReason = null
 } = {}) {
   const finishedAt = Date.now();
@@ -268,7 +271,9 @@ function buildMessageMetadata({
       doneReason,
       webSearchMs: search?.elapsedMs || 0,
       webSearch: search,
-      sources: searchContext?.sources || []
+      sources: searchContext?.sources || [],
+      toolCards: toolCards.slice(-8),
+      toolActions: toolActions.slice(-8)
     }
   };
 }
@@ -375,6 +380,40 @@ async function streamAssistantReply({
   let firstTokenAt = null;
   let tokenCount = 0;
   let searchContext = null;
+  const clientToolActions = [];
+  const toolCards = [];
+
+  const upsertToolCard = (card) => {
+    const normalized = {
+      id: card.toolCallId || `tool_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      at: Date.now(),
+      ...card
+    };
+    const index = toolCards.findIndex((item) => item.toolCallId === normalized.toolCallId);
+    if (index >= 0) {
+      toolCards[index] = { ...toolCards[index], ...normalized };
+    } else {
+      toolCards.push(normalized);
+    }
+    if (toolCards.length > 8) toolCards.splice(0, toolCards.length - 8);
+    return normalized;
+  };
+
+  const rememberClientToolAction = (toolCallId, name, action) => {
+    clientToolActions.push({
+      toolCallId,
+      name,
+      action,
+      at: Date.now()
+    });
+    upsertToolCard({
+      toolCallId,
+      name,
+      toolName: name,
+      action: action.action,
+      ...action
+    });
+  };
 
   const onClose = () => {
     if (!completed && !entry.abortController.signal.aborted) {
@@ -415,7 +454,30 @@ async function streamAssistantReply({
     workingMessages = searchContext.messages;
 
     if (searchContext.event) {
-      await writeSse(response, 'web_search', searchContext.event);
+      const toolCallId = `web_search_${requestStartedAt}`;
+      const display = buildToolDisplay({
+        name: 'web_search',
+        result: {
+          ...searchContext.event,
+          results: searchContext.sources || []
+        },
+        source: `Local ${searchContext.event.provider || 'web'} search`,
+        cacheHit: Boolean(searchContext.event.cacheHit),
+        text: searchContext.event.message || ''
+      }, { maxChars: config.toolMaxResultChars });
+      upsertToolCard({
+        toolCallId,
+        name: 'web_search',
+        toolName: 'web_search',
+        status: searchContext.event.used ? 'complete' : 'skipped',
+        startedAt: requestStartedAt,
+        completedAt: Date.now(),
+        elapsedMs: Number(searchContext.event.elapsedMs || 0),
+        cacheHit: Boolean(searchContext.event.cacheHit),
+        source: `Local ${searchContext.event.provider || 'web'} search`,
+        display
+      });
+      await writeSse(response, 'web_search', { ...searchContext.event, toolCallId, display });
     }
 
     const query = latestUserQuery(messages).trim();
@@ -428,25 +490,49 @@ async function streamAssistantReply({
       if (fastResult) {
         const toolCallId = `tool_${Date.now()}_${Math.random().toString(36).slice(2)}`;
         if (!fastResult.missing) {
+          upsertToolCard({
+            toolCallId,
+            name: fastResult.name,
+            toolName: fastResult.name,
+            status: 'running',
+            startedAt,
+            argsPreview: ''
+          });
           await writeSse(response, 'tool_call_start', {
             toolCallId,
             name: fastResult.name,
-            argsPreview: ''
+            argsPreview: '',
+            startedAt
           });
         }
         if (fastResult.clientAction) {
+          rememberClientToolAction(toolCallId, fastResult.name, fastResult.clientAction);
           await writeSse(response, 'client_tool_action', {
             toolCallId,
             name: fastResult.name,
             action: fastResult.clientAction
           });
         }
+        const display = buildToolDisplay(fastResult, { maxChars: config.toolMaxResultChars });
+        upsertToolCard({
+          toolCallId,
+          name: fastResult.name,
+          toolName: fastResult.name,
+          status: 'complete',
+          startedAt,
+          completedAt: Date.now(),
+          elapsedMs: Date.now() - startedAt,
+          cacheHit: Boolean(fastResult.cacheHit),
+          source: fastResult.source || 'local',
+          display
+        });
         await writeSse(response, 'tool_call_result', {
           toolCallId,
           name: fastResult.name,
           elapsedMs: Date.now() - startedAt,
           cacheHit: Boolean(fastResult.cacheHit),
-          source: fastResult.source || 'local'
+          source: fastResult.source || 'local',
+          display
         });
         if (fastResult.direct) {
           content = fastResult.text || truncate(fastResult.result, config.toolMaxResultChars);
@@ -462,6 +548,8 @@ async function streamAssistantReply({
               firstTokenAt,
               tokenCount,
               searchContext,
+              toolActions: clientToolActions,
+              toolCards,
               doneReason: 'tool_result'
             })
           });
@@ -497,17 +585,41 @@ async function streamAssistantReply({
           const toolCallId = call.id || `tool_${Date.now()}_${Math.random().toString(36).slice(2)}`;
           const startedAt = Date.now();
           try {
-            await writeSse(response, 'tool_call_start', { toolCallId, name, argsPreview: argsPreview(parsedArgs) });
+            const preview = argsPreview(parsedArgs);
+            upsertToolCard({
+              toolCallId,
+              name,
+              toolName: name,
+              status: 'running',
+              startedAt,
+              argsPreview: preview
+            });
+            await writeSse(response, 'tool_call_start', { toolCallId, name, argsPreview: preview, startedAt });
             const result = await executeTool(name, parsedArgs, toolRuntime, { signal: entry.abortController.signal });
             if (result.clientAction) {
+              rememberClientToolAction(toolCallId, name, result.clientAction);
               await writeSse(response, 'client_tool_action', { toolCallId, name, action: result.clientAction });
             }
+            const display = buildToolDisplay(result, { maxChars: config.toolMaxResultChars });
+            upsertToolCard({
+              toolCallId,
+              name,
+              toolName: name,
+              status: 'complete',
+              startedAt,
+              completedAt: Date.now(),
+              elapsedMs: Date.now() - startedAt,
+              cacheHit: Boolean(result.cacheHit),
+              source: result.source || 'local',
+              display
+            });
             await writeSse(response, 'tool_call_result', {
               toolCallId,
               name,
               elapsedMs: Date.now() - startedAt,
               cacheHit: Boolean(result.cacheHit),
-              source: result.source || 'local'
+              source: result.source || 'local',
+              display
             });
             toolResults.push(result);
             executedMessages.push({
@@ -517,11 +629,27 @@ async function streamAssistantReply({
           } catch (error) {
             if (entry.abortController.signal.aborted) throw error;
             const message = error instanceof Error ? error.message : 'Tool failed.';
+            const display = {
+              title: name,
+              summary: message
+            };
+            upsertToolCard({
+              toolCallId,
+              name,
+              toolName: name,
+              status: 'error',
+              startedAt,
+              completedAt: Date.now(),
+              elapsedMs: Date.now() - startedAt,
+              error: message,
+              display
+            });
             await writeSse(response, 'tool_call_error', {
               toolCallId,
               name,
               message,
-              elapsedMs: Date.now() - startedAt
+              elapsedMs: Date.now() - startedAt,
+              display
             });
             executedMessages.push({
               role: 'tool',
@@ -545,10 +673,21 @@ async function streamAssistantReply({
         }
       } catch (error) {
         if (entry.abortController.signal.aborted) throw error;
-        await writeSse(response, 'tool_call_error', {
+        const message = error instanceof Error ? error.message : 'Tool planning failed.';
+        upsertToolCard({
           toolCallId: `planner_${Date.now()}`,
           name: 'tool_planner',
-          message: error instanceof Error ? error.message : 'Tool planning failed.',
+          toolName: 'tool_planner',
+          status: 'error',
+          completedAt: Date.now(),
+          elapsedMs: 0,
+          error: message,
+          display: { title: 'Tool Planner', summary: message }
+        });
+        await writeSse(response, 'tool_call_error', {
+          toolCallId: toolCards.at(-1)?.toolCallId || `planner_${Date.now()}`,
+          name: 'tool_planner',
+          message,
           elapsedMs: 0
         });
       }
@@ -585,6 +724,8 @@ async function streamAssistantReply({
         firstTokenAt,
         tokenCount,
         searchContext,
+        toolActions: clientToolActions,
+        toolCards,
         doneReason
       })
     });
@@ -605,6 +746,8 @@ async function streamAssistantReply({
           firstTokenAt,
           tokenCount,
           searchContext,
+          toolActions: clientToolActions,
+          toolCards,
           doneReason: reason
         })
       });
@@ -625,6 +768,8 @@ async function streamAssistantReply({
           firstTokenAt,
           tokenCount,
           searchContext,
+          toolActions: clientToolActions,
+          toolCards,
           doneReason: 'error'
         })
       });

@@ -34,6 +34,238 @@ function truncate(value, maxChars = 3000) {
   return `${text.slice(0, Math.max(0, maxChars - 17))}\n[truncated]`;
 }
 
+function truncateOneLine(value, maxChars = 180) {
+  return truncate(String(value ?? '').replace(/\s+/g, ' ').trim(), maxChars);
+}
+
+function labelForTool(name) {
+  return {
+    get_weather: 'Weather',
+    web_search: 'Web Search',
+    calculate: 'Calculator',
+    convert_units: 'Unit Conversion',
+    date_time: 'Date & Time',
+    random_pick: 'Random Pick',
+    text_transform: 'Text Transform',
+    uuid_generate: 'UUID',
+    hash_text: 'Hash',
+    base64_codec: 'Base64',
+    json_format: 'JSON',
+    color_convert: 'Color',
+    password_generate: 'Password',
+    timer_start: 'Timer',
+    timer_cancel: 'Timer',
+    timer_list: 'Timers',
+    stopwatch_start: 'Stopwatch',
+    stopwatch_stop: 'Stopwatch',
+    stopwatch_reset: 'Stopwatch',
+    stopwatch_list: 'Stopwatches'
+  }[name] || name;
+}
+
+function formatValue(value) {
+  if (value == null || value === '') return '--';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(12)));
+  return String(value);
+}
+
+function compactRows(rows) {
+  return rows
+    .filter((row) => row && row.label && row.value != null)
+    .map((row) => ({
+      label: truncateOneLine(row.label, 48),
+      value: truncateOneLine(row.value, 140)
+    }));
+}
+
+function displayForClientAction(name, action = {}) {
+  const label = action.label || (name.startsWith('stopwatch') ? 'Stopwatch' : 'Timer');
+  if (name === 'timer_start') {
+    return {
+      title: 'Timer',
+      summary: label,
+      rows: compactRows([
+        { label: 'Duration', value: `${Math.round(Number(action.durationMs || 0) / 1000)}s` }
+      ])
+    };
+  }
+  if (name === 'timer_cancel') {
+    return { title: 'Timer', summary: 'Cancelled', rows: compactRows([{ label: 'ID', value: action.id }]) };
+  }
+  if (name === 'stopwatch_start') {
+    return { title: 'Stopwatch', summary: label };
+  }
+  if (name === 'stopwatch_stop') {
+    return { title: 'Stopwatch', summary: 'Stopped', rows: compactRows([{ label: 'ID', value: action.id }]) };
+  }
+  if (name === 'stopwatch_reset') {
+    return { title: 'Stopwatch', summary: 'Reset', rows: compactRows([{ label: 'ID', value: action.id }]) };
+  }
+  return { title: labelForTool(name), summary: action.action || 'Updated' };
+}
+
+export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
+  const name = toolResult.name;
+  const result = toolResult.result || {};
+  const text = toolResult.text || '';
+
+  if (toolResult.missing) {
+    return {
+      title: labelForTool(name),
+      summary: truncateOneLine(text || `Missing ${toolResult.missing}.`)
+    };
+  }
+
+  if (toolResult.clientAction) {
+    return displayForClientAction(name, toolResult.clientAction);
+  }
+
+  if (name === 'get_weather') {
+    const current = result.current || {};
+    return {
+      title: result.location || 'Weather',
+      summary: truncateOneLine(`${current.summary || 'Current weather'} · ${formatValue(current.temperatureF)}F`),
+      rows: compactRows([
+        { label: 'Feels like', value: `${formatValue(current.feelsLikeF)}F` },
+        { label: 'Humidity', value: `${formatValue(current.humidityPercent)}%` },
+        { label: 'Wind', value: `${formatValue(current.windMph)} mph` },
+        { label: 'Precip', value: `${formatValue(current.precipitationIn)} in` },
+        ...((result.forecast || []).slice(0, 3).map((day) => ({
+          label: day.date,
+          value: `${day.summary || 'Forecast'}, high ${formatValue(day.highF)}F, low ${formatValue(day.lowF)}F`
+        })))
+      ])
+    };
+  }
+
+  if (name === 'web_search') {
+    const results = Array.isArray(result.results) ? result.results : [];
+    const links = results
+      .filter((item) => item?.url)
+      .slice(0, 3)
+      .map((item) => ({
+        title: truncateOneLine(item.title || item.url, 90),
+        url: item.url
+      }));
+    return {
+      title: 'Web Search',
+      summary: truncateOneLine(result.message || result.skipped || `${Number(result.resultCount || results.length || 0)} results`),
+      rows: compactRows([
+        { label: 'Provider', value: result.provider || toolResult.source || 'local' },
+        { label: 'Fetched', value: result.fetchedCount ?? results.length },
+        { label: 'Cache', value: toolResult.cacheHit || result.cacheHit ? 'hit' : 'miss' }
+      ]),
+      links
+    };
+  }
+
+  if (name === 'calculate') {
+    return {
+      title: 'Calculator',
+      summary: truncateOneLine(text),
+      rows: compactRows([
+        { label: 'Expression', value: result.expression },
+        { label: 'Result', value: result.result }
+      ])
+    };
+  }
+
+  if (name === 'convert_units') {
+    return {
+      title: 'Unit Conversion',
+      summary: truncateOneLine(text),
+      rows: compactRows([
+        { label: 'From', value: `${formatValue(result.value)} ${result.from || ''}`.trim() },
+        { label: 'To', value: `${formatValue(result.result)} ${result.to || ''}`.trim() }
+      ])
+    };
+  }
+
+  if (name === 'date_time') {
+    return {
+      title: 'Date & Time',
+      summary: truncateOneLine(text || result.iso),
+      rows: compactRows([
+        { label: 'Timezone', value: result.timezone },
+        { label: 'ISO', value: result.iso },
+        { label: 'Days', value: result.days != null ? Number(result.days).toFixed(2) : null }
+      ])
+    };
+  }
+
+  if (name === 'random_pick') {
+    return {
+      title: 'Random Pick',
+      summary: truncateOneLine(result.choice ?? result.result ?? text)
+    };
+  }
+
+  if (name === 'text_transform') {
+    return {
+      title: 'Text Transform',
+      summary: truncateOneLine(result.operation || 'transformed'),
+      code: truncate(result.result ?? text, Math.min(maxChars, 500))
+    };
+  }
+
+  if (name === 'uuid_generate') {
+    return {
+      title: 'UUID',
+      summary: `${(result.values || []).length || 1} generated`,
+      items: (result.values || [text]).slice(0, 5).map((item) => truncateOneLine(item, 120))
+    };
+  }
+
+  if (name === 'hash_text') {
+    return {
+      title: 'Hash',
+      summary: result.algorithm || 'digest',
+      code: truncateOneLine(result.digest || text, 180)
+    };
+  }
+
+  if (name === 'base64_codec') {
+    return {
+      title: 'Base64',
+      summary: result.operation || 'converted',
+      code: truncate(result.result ?? text, Math.min(maxChars, 500))
+    };
+  }
+
+  if (name === 'json_format') {
+    return {
+      title: 'JSON',
+      summary: 'Formatted JSON',
+      code: truncate(result.result ?? text, Math.min(maxChars, 700))
+    };
+  }
+
+  if (name === 'color_convert') {
+    return {
+      title: 'Color',
+      summary: result.text || text,
+      color: result.hex,
+      rows: compactRows([
+        { label: 'Hex', value: result.hex },
+        { label: 'RGB', value: result.rgb }
+      ])
+    };
+  }
+
+  if (name === 'password_generate') {
+    return {
+      title: 'Password',
+      summary: `${String(result.password || text).length} characters`,
+      code: truncateOneLine(result.password || text, 180)
+    };
+  }
+
+  return {
+    title: labelForTool(name),
+    summary: truncateOneLine(text || result.message || result.action || 'Done')
+  };
+}
+
 function normalizeToolsOptions(tools, { webSearch = true } = {}) {
   const enabled = tools?.enabled !== false;
   const requested = Array.isArray(tools?.allowed) ? tools.allowed : [...ALL_TOOL_NAMES];

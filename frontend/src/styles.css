@@ -762,6 +762,161 @@ button, input, textarea, select { font: inherit; }
   text-underline-offset: 3px;
 }
 
+.messageToolCards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.messageToolCard {
+  position: relative;
+  min-width: 170px;
+  max-width: min(320px, 100%);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-strong) 48%, transparent);
+  color: var(--ink);
+}
+
+.toolCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toolCardHeader strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolCardHeader strong {
+  font-weight: 800;
+}
+
+.toolCardStatus,
+.messageToolCardSummary,
+.toolCardError {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolCardStatus {
+  flex: 0 0 auto;
+  max-width: 72px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.messageToolCardSummary {
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.messageToolCard.isDone,
+.messageToolCard.isRunning {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+}
+
+.messageToolCard.isError {
+  border-color: color-mix(in srgb, #d74242 42%, var(--line));
+}
+
+.toolCardRows {
+  display: grid;
+  grid-template-columns: minmax(54px, max-content) minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 9px 0 0;
+  font-size: 12px;
+}
+
+.toolCardRows dt {
+  color: var(--muted);
+}
+
+.toolCardRows dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolCardLinks,
+.toolCardItems {
+  margin-top: 9px;
+}
+
+.toolCardLinks {
+  display: grid;
+  gap: 5px;
+}
+
+.toolCardLinks a {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 72%, var(--ink));
+  font-size: 12px;
+  text-overflow: ellipsis;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.toolCardItems {
+  padding-left: 18px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.toolCardItems li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolCardCode {
+  max-height: 140px;
+  margin: 9px 0 0;
+  overflow: auto;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--line));
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.12);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.toolColorSwatch {
+  display: block;
+  width: 100%;
+  height: 18px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.toolCardError {
+  margin-top: 7px;
+  color: color-mix(in srgb, #d74242 72%, var(--ink));
+  font-size: 12px;
+}
+
 .messageContent {
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -910,31 +1065,6 @@ button, input, textarea, select { font: inherit; }
   letter-spacing: -0.03em;
 }
 
-.chatDots {
-  position: absolute;
-  left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 6px;
-  z-index: 12;
-}
-
-.chatDots button {
-  width: 7px;
-  height: 7px;
-  border-radius: 7px;
-  border: 0;
-  background: color-mix(in srgb, var(--ink) 22%, transparent);
-  padding: 0;
-  transition: width 180ms ease, background 180ms ease;
-}
-
-.chatDots .isCurrent {
-  width: 22px;
-  background: var(--accent);
-}
-
 .newThreadButton {
   position: absolute;
   right: clamp(14px, 3vw, 72px);
@@ -1025,15 +1155,9 @@ button, input, textarea, select { font: inherit; }
   white-space: nowrap;
 }
 
-.backendValue,
 .statValue {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-}
-
-.backendValue {
-  display: inline-block;
-  width: 5ch;
 }
 
 .statValue {
@@ -1076,52 +1200,6 @@ button, input, textarea, select { font: inherit; }
 
 .statValue.isAnimating.isDown .statValueItem.previous {
   animation: statPreviousDown 260ms cubic-bezier(.2,.85,.22,1) both;
-}
-
-.toolShelf {
-  width: min(880px, calc(100vw - 116px));
-  margin: 0 auto 8px;
-  display: flex;
-  gap: 7px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.toolShelf::-webkit-scrollbar {
-  display: none;
-}
-
-.toolChip {
-  flex: 0 0 auto;
-  min-width: 110px;
-  max-width: 220px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface-strong) 58%, transparent);
-  color: var(--ink);
-}
-
-.toolChip strong,
-.toolChip span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.toolChip span {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-.toolChip.isDone {
-  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
-}
-
-.toolChip.isActivity {
-  opacity: 0.82;
 }
 
 .queueShelf {
@@ -1464,7 +1542,6 @@ pre {
 
   .chatViewport,
   .composerShell,
-  .toolShelf,
   .attachmentTray {
     width: calc(100vw - 44px);
   }

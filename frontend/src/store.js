@@ -41,6 +41,23 @@ const useStore = create(
           ].slice(0, 6),
         })),
       clearToolActivities: () => set({ toolActivities: [] }),
+      streamToolCards: [],
+      addStreamToolCard: (card) =>
+        set((s) => ({
+          streamToolCards: (() => {
+            const nextCard = {
+              id: card.toolCallId || card.id || `toolcard${Date.now()}${Math.random().toString(36).slice(2)}`,
+              at: Date.now(),
+              ...card,
+            }
+            const index = s.streamToolCards.findIndex((item) => item.toolCallId && item.toolCallId === nextCard.toolCallId)
+            if (index < 0) return [...s.streamToolCards, nextCard].slice(-8)
+            const next = [...s.streamToolCards]
+            next[index] = { ...next[index], ...nextCard }
+            return next.slice(-8)
+          })(),
+        })),
+      clearStreamToolCards: () => set({ streamToolCards: [] }),
       timers: [],
       stopwatches: [],
       applyClientToolAction: (action) =>
@@ -58,6 +75,7 @@ const useStore = create(
                   targetAt: now + durationMs,
                   createdAt: now,
                   status: 'active',
+                  toolCallId: action.toolCallId || null,
                 },
               ],
             }
@@ -75,6 +93,7 @@ const useStore = create(
                   startedAt: now,
                   elapsedMs: 0,
                   running: true,
+                  toolCallId: action.toolCallId || null,
                 },
               ],
             }

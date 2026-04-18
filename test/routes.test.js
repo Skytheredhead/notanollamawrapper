@@ -371,7 +371,188 @@ test('message route adds web search context when enabled and available', async (
     assert.equal(complete.metrics.webSearch.provider, 'searxng');
     assert.equal(complete.metrics.webSearch.resultCount, 1);
     assert.equal(complete.metrics.sources[0].url, 'https://example.com/result');
+    const searchEvent = events.find((event) => event.event === 'web_search');
+    assert.equal(searchEvent.data.display.title, 'Web Search');
+    assert.equal(searchEvent.data.display.links[0].url, 'https://example.com/result');
+    assert.equal(complete.metrics.toolCards[0].display.links[0].url, 'https://example.com/result');
     assert.equal(typeof complete.metrics.generationMs, 'number');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('weather fast path emits display data and persists a tool card', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.startsWith('https://geo.test')) {
+      return Response.json({
+        results: [{
+          name: 'San Francisco',
+          admin1: 'California',
+          country: 'United States',
+          latitude: 37.77,
+          longitude: -122.42,
+          timezone: 'America/Los_Angeles'
+        }]
+      });
+    }
+    return Response.json({
+      timezone: 'America/Los_Angeles',
+      current: {
+        time: '2026-04-18T12:00',
+        temperature_2m: 65,
+        apparent_temperature: 64,
+        relative_humidity_2m: 55,
+        precipitation: 0,
+        weather_code: 0,
+        wind_speed_10m: 8,
+        wind_gusts_10m: 12
+      },
+      daily: {
+        time: ['2026-04-18', '2026-04-19'],
+        weather_code: [0, 2],
+        temperature_2m_max: [68, 66],
+        temperature_2m_min: [52, 51],
+        precipitation_probability_max: [5, 10],
+        precipitation_sum: [0, 0],
+        wind_speed_10m_max: [13, 14]
+      }
+    });
+  };
+
+  const harness = makeHarness({
+    NAOW_WEATHER_GEOCODE_URL: 'https://geo.test/search',
+    NAOW_WEATHER_FORECAST_URL: 'https://forecast.test/forecast'
+  }, {
+    async *streamChat() {
+      yield { type: 'token', delta: 'unused' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'weather in San Francisco',
+        webSearch: false
+      }
+    });
+
+    const events = parseSse(response.payload);
+    const result = events.find((event) => event.event === 'tool_call_result');
+    assert.equal(result.data.name, 'get_weather');
+    assert.equal(result.data.display.title, 'San Francisco, California, United States');
+    assert.match(result.data.display.summary, /65F/);
+
+    const complete = events.at(-1).data.message;
+    assert.equal(complete.metrics.toolCards[0].name, 'get_weather');
+    assert.equal(complete.metrics.toolCards[0].display.rows.some((row) => row.label === 'Humidity'), true);
+
+    const load = await harness.app.inject({ method: 'GET', url: `/api/chats/${chat.id}` });
+    const assistant = load.json().messages.find((message) => message.role === 'assistant');
+    assert.equal(assistant.metrics.toolCards[0].display.title, 'San Francisco, California, United States');
+  } finally {
+    await harness.cleanup();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('tool errors emit error cards without blocking message completion', async () => {
+  const harness = makeHarness({}, {
+    async completeChat() {
+      return {
+        message: {
+          content: '',
+          tool_calls: [{
+            id: 'bad_calc',
+            function: {
+              name: 'calculate',
+              arguments: JSON.stringify({ expression: '1 / 0' })
+            }
+          }]
+        }
+      };
+    },
+    async *streamChat() {
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'please calculate something tricky',
+        webSearch: false
+      }
+    });
+
+    const events = parseSse(response.payload);
+    const error = events.find((event) => event.event === 'tool_call_error');
+    assert.equal(error.data.toolCallId, 'bad_calc');
+    assert.equal(error.data.display.summary, 'Division by zero.');
+    assert.equal(events.at(-1).event, 'message_complete');
+    assert.equal(events.at(-1).data.message.metrics.toolCards[0].status, 'error');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('timer tool cards preserve legacy tool actions', async () => {
+  const harness = makeHarness({}, {
+    async *streamChat() {
+      yield { type: 'token', delta: 'unused' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'set a timer for 2 seconds',
+        webSearch: false
+      }
+    });
+
+    const events = parseSse(response.payload);
+    const complete = events.at(-1).data.message;
+    assert.equal(complete.metrics.toolActions[0].action.action, 'timer_start');
+    assert.equal(complete.metrics.toolCards[0].action, 'timer_start');
+    assert.equal(complete.metrics.toolCards[0].display.title, 'Timer');
   } finally {
     await harness.cleanup();
   }
