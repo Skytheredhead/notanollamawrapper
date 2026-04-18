@@ -49,6 +49,34 @@ test('web search normalizes SearXNG results and extracts fetched pages', async (
   assert.equal(calls.length, 2);
 });
 
+test('web search can return snippets without fetching pages', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).startsWith('http://search.local')) {
+      return Response.json({
+        results: [{
+          title: 'Snippet title',
+          url: 'https://example.com/snippet',
+          content: 'Fast snippet'
+        }]
+      });
+    }
+    return new Response('<main>Should not be fetched</main>', {
+      headers: { 'content-type': 'text/html' }
+    });
+  };
+  const client = new WebSearchClient({ config: baseConfig, fetchImpl, lookupImpl: publicLookup });
+  const result = await client.search('hello world', { fetchPages: 0 });
+
+  assert.equal(result.provider, 'searxng');
+  assert.equal(result.resultCount, 1);
+  assert.equal(result.fetchedCount, 0);
+  assert.equal(result.results[0].title, 'Snippet title');
+  assert.equal(result.results[0].content, 'Fast snippet');
+  assert.equal(calls.length, 1);
+});
+
 test('web search returns no_results for empty SearXNG result sets', async () => {
   const client = new WebSearchClient({
     config: baseConfig,

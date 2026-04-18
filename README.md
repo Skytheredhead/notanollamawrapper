@@ -18,6 +18,6 @@ The Vite dev server runs on `http://127.0.0.1:5173` and proxies `/api` and `/hea
 ### Current models:
 
 - `mlx-community/Qwen3.5-9B-MLX-4bit` - pinned and kept loaded.
-- `Jiunsong/supergemma4-26b-uncensored-mlx-4bit-v2` - pinned and kept loaded after download.
+- `Jiunsong/supergemma4-26b-uncensored-mlx-4bit-v2` - loaded on demand.
 - `mlx-community/gpt-oss-20b-MXFP4-Q8` - loaded on demand.
-- `mlx-community/Qwen3-0.6B-4bit-DWQ-053125` - loaded on demand.
+- `mlx-community/Qwen3-0.6B-4bit-DWQ-053125` - pinned and kept loaded for pre-search.

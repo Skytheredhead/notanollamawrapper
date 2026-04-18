@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 import subprocess
@@ -124,6 +125,7 @@ def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
             "model": model,
             "processor": processor,
             "visionCache": VisionFeatureCache(),
+            "promptCaches": {},
         }
 
     from mlx_lm import load
@@ -135,6 +137,7 @@ def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
         "pinned": spec.pinned,
         "model": model,
         "tokenizer": tokenizer,
+        "promptCaches": {},
     }
 
 
@@ -170,7 +173,97 @@ def _unload_runtime(model_name: str | None = None, *, include_pinned: bool = Fal
     return unloaded
 
 
-def _idle_cleanup(*, min_idle_seconds: float = 0, include_pinned: bool = True) -> dict[str, Any]:
+def _stable_json(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return str(value)
+
+
+def _cache_digest(parts: list[Any]) -> str:
+    return hashlib.sha256("\n".join(str(part) for part in parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _prompt_cache_request(payload: dict[str, Any], runtime: dict[str, Any], images: list[str]) -> dict[str, Any]:
+    raw = payload.get("cache") if isinstance(payload.get("cache"), dict) else {}
+    enabled = raw.get("usePromptCache", raw.get("enabled", False)) is not False
+    chat_id = str(raw.get("chatId") or "").strip()
+    if not enabled:
+        return {"enabled": False, "disabledReason": "disabled"}
+    if runtime.get("backend") != "vlm":
+        return {"enabled": False, "disabledReason": "backend_unsupported"}
+    if not chat_id:
+        return {"enabled": False, "disabledReason": "missing_chat_id"}
+
+    attachment_signature = str(raw.get("attachmentSignature") or "|".join(images) or "none")
+    key = _cache_digest([
+        runtime.get("modelName") or "",
+        chat_id,
+        raw.get("cacheBranchId") or "main",
+        raw.get("systemPromptHash") or "",
+        attachment_signature,
+    ])
+    return {
+        "enabled": True,
+        "key": key,
+        "chatId": chat_id,
+        "branchId": str(raw.get("cacheBranchId") or "main"),
+        "attachmentSignature": attachment_signature,
+    }
+
+
+def _token_ids_for_prompt(processor: Any, prompt: str) -> list[int]:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        tokenizer = processor
+    if hasattr(tokenizer, "encode"):
+        encoded = tokenizer.encode(prompt)
+    else:
+        encoded = tokenizer(prompt)
+    if isinstance(encoded, dict):
+        encoded = encoded.get("input_ids") or []
+    if hasattr(encoded, "tolist"):
+        encoded = encoded.tolist()
+    if encoded and isinstance(encoded[0], list):
+        encoded = encoded[0]
+    return [int(item) for item in encoded]
+
+
+def _prompt_cache_state(runtime: dict[str, Any], request: dict[str, Any]) -> tuple[Any | None, dict[str, Any]]:
+    if not request.get("enabled"):
+        return None, {
+            "enabled": False,
+            "hit": False,
+            "disabledReason": request.get("disabledReason") or "disabled",
+        }
+    try:
+        from mlx_vlm.generate import PromptCacheState
+    except Exception as exc:
+        return None, {
+            "enabled": False,
+            "hit": False,
+            "disabledReason": f"unavailable:{exc}",
+        }
+
+    caches = runtime.setdefault("promptCaches", {})
+    key = request["key"]
+    state = caches.get(key)
+    created = False
+    if state is None:
+        state = PromptCacheState()
+        caches[key] = state
+        created = True
+    return state, {
+        "enabled": True,
+        "hit": not created,
+        "key": key,
+        "chatId": request.get("chatId"),
+        "branchId": request.get("branchId"),
+        "priorTokens": len(getattr(state, "token_ids", []) or []),
+    }
+
+
+def _idle_cleanup(*, min_idle_seconds: float = 0, include_pinned: bool = False) -> dict[str, Any]:
     with _runtime_lock:
         active_streams = int(_runtime.get("activeStreams") or 0)
         idle_for = max(0.0, time.monotonic() - float(_runtime.get("lastActiveAt") or time.monotonic()))
@@ -180,7 +273,7 @@ def _idle_cleanup(*, min_idle_seconds: float = 0, include_pinned: bool = True) -
             return {"cleaned": False, "reason": "not_idle", "activeStreams": active_streams, "idleForSeconds": idle_for}
 
     unloaded = _unload_runtime(None, include_pinned=include_pinned)
-    if not unloaded:
+    if not unloaded and not _loaded_models():
         _clear_mlx_cache()
     return {
         "cleaned": True,
@@ -227,7 +320,7 @@ def _idle_watchdog() -> None:
         if unload_seconds <= 0:
             continue
         try:
-            _idle_cleanup(min_idle_seconds=unload_seconds, include_pinned=True)
+            _idle_cleanup(min_idle_seconds=unload_seconds, include_pinned=False)
         except Exception as exc:
             print(f"MLX idle cleanup failed: {exc}", file=sys.stderr, flush=True)
 
@@ -377,9 +470,25 @@ async def unload_model(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"unloaded": unloaded, "count": len(unloaded), "keptLoaded": _loaded_models()}
 
 
+@app.post("/runtime/prompt-cache/clear")
+async def clear_prompt_cache(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    model_name = str((payload or {}).get("model") or "").strip()
+    cleared = 0
+    with _runtime_lock:
+        runtimes = [_runtime["loaded"].get(model_name)] if model_name else list(_runtime["loaded"].values())
+        for runtime in runtimes:
+            if not runtime:
+                continue
+            caches = runtime.get("promptCaches")
+            if isinstance(caches, dict):
+                cleared += len(caches)
+                caches.clear()
+    return {"cleared": cleared}
+
+
 @app.post("/runtime/idle-cleanup")
 async def runtime_idle_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    include_pinned = bool((payload or {}).get("includePinned", True))
+    include_pinned = bool((payload or {}).get("includePinned", False))
     min_idle_seconds = float((payload or {}).get("minIdleSeconds", 0))
     return _idle_cleanup(min_idle_seconds=min_idle_seconds, include_pinned=include_pinned)
 
@@ -403,6 +512,7 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
     images = [str(item) for item in payload.get("images", []) if str(item).strip()]
     prompt_messages = _message_payload(messages)
     prompt = prompt_messages or str(payload.get("prompt") or "")
+    cache_request = _prompt_cache_request(payload, runtime, images)
 
     def generate_events():
         _stream_started()
@@ -411,6 +521,7 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
                 from mlx_vlm import stream_generate
                 from mlx_vlm.prompt_utils import apply_chat_template
 
+                template_started = time.monotonic()
                 model = runtime["model"]
                 processor = runtime["processor"]
                 templated_prompt = apply_chat_template(
@@ -420,9 +531,48 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
                     num_images=len(images),
                     **_chat_template_kwargs(options),
                 )
+                chat_template_ms = round((time.monotonic() - template_started) * 1000, 3)
                 kwargs = _generation_kwargs(options)
                 if runtime.get("visionCache") is not None:
                     kwargs["vision_cache"] = runtime["visionCache"]
+                prompt_cache_state, cache_metrics = _prompt_cache_state(runtime, cache_request)
+                prompt_tokens = None
+                if prompt_cache_state is not None:
+                    try:
+                        prompt_token_ids = _token_ids_for_prompt(processor, templated_prompt)
+                        prompt_tokens = len(prompt_token_ids)
+                        prefix_length = prompt_cache_state.find_prefix_length(prompt_token_ids)
+                        cache_metrics["hit"] = prefix_length > 0
+                        cache_metrics["reusedTokens"] = prefix_length
+                        cache_metrics["newTokens"] = max(0, len(prompt_token_ids) - prefix_length)
+                        kwargs["prompt_cache_state"] = prompt_cache_state
+                    except Exception as exc:
+                        cache_metrics = {
+                            "enabled": False,
+                            "hit": False,
+                            "disabledReason": f"tokenize_failed:{exc}",
+                        }
+                yield json.dumps({
+                    "type": "meta",
+                    "chatTemplateMs": chat_template_ms,
+                    "promptChars": len(templated_prompt),
+                    "promptTokens": prompt_tokens,
+                    "promptCache": cache_metrics,
+                }) + "\n"
+                print(
+                    "prompt-cache",
+                    _stable_json({
+                        "model": runtime.get("modelName"),
+                        "enabled": cache_metrics.get("enabled"),
+                        "hit": cache_metrics.get("hit"),
+                        "reusedTokens": cache_metrics.get("reusedTokens"),
+                        "newTokens": cache_metrics.get("newTokens"),
+                        "disabledReason": cache_metrics.get("disabledReason"),
+                        "key": cache_metrics.get("key"),
+                    }),
+                    file=sys.stderr,
+                    flush=True,
+                )
                 for chunk in stream_generate(model, processor, templated_prompt, image=images or None, **kwargs):
                     text = getattr(chunk, "text", "")
                     if text:
@@ -432,8 +582,21 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
 
                 if images:
                     raise ValueError(f"{runtime['modelName']} does not support image inputs.")
+                template_started = time.monotonic()
                 tokenizer = runtime["tokenizer"]
                 templated_prompt = _apply_lm_chat_template(tokenizer, prompt, options)
+                chat_template_ms = round((time.monotonic() - template_started) * 1000, 3)
+                yield json.dumps({
+                    "type": "meta",
+                    "chatTemplateMs": chat_template_ms,
+                    "promptChars": len(templated_prompt),
+                    "promptTokens": None,
+                    "promptCache": {
+                        "enabled": False,
+                        "hit": False,
+                        "disabledReason": "backend_unsupported",
+                    },
+                }) + "\n"
                 kwargs = _lm_generation_kwargs(options)
                 for chunk in stream_generate(runtime["model"], tokenizer, templated_prompt, **kwargs):
                     text = getattr(chunk, "text", "")
@@ -447,10 +610,11 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
             if residency == "unload_after_reply" and not runtime.get("pinned"):
                 _unload_runtime(runtime["modelName"])
             elif residency == "warm_idle":
-                with _runtime_lock:
-                    if runtime.get("visionCache") is not None and not runtime.get("pinned"):
-                        runtime["visionCache"] = None
-                _clear_mlx_cache()
+                if not runtime.get("pinned"):
+                    with _runtime_lock:
+                        if runtime.get("visionCache") is not None:
+                            runtime["visionCache"] = None
+                    _clear_mlx_cache()
             _stream_finished()
 
     return StreamingResponse(generate_events(), media_type="application/x-ndjson")

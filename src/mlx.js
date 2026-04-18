@@ -160,6 +160,30 @@ export class MlxClient {
     return response.json();
   }
 
+  async completeChat({ model, messages, options, signal }) {
+    let content = '';
+    let doneReason = 'stop';
+    for await (const chunk of this.streamChat({
+      model,
+      messages,
+      options: {
+        ...(options || {}),
+        max_tokens: Math.min(Number(options?.max_tokens || options?.num_predict || 256), 512)
+      },
+      signal
+    })) {
+      if (chunk.type === 'token') content += chunk.delta;
+      if (chunk.type === 'done') doneReason = chunk.doneReason || 'stop';
+    }
+    return {
+      message: {
+        role: 'assistant',
+        content
+      },
+      doneReason
+    };
+  }
+
   async unloadLoadedModels({ includePinnedMlx = false } = {}) {
     const response = await this.fetch(`${this.baseUrl}/models/unload`, {
       method: 'POST',
@@ -170,7 +194,17 @@ export class MlxClient {
     return response.json();
   }
 
-  async *streamChat({ model, messages, options, signal }) {
+  async clearPromptCache({ model } = {}) {
+    const response = await this.fetch(`${this.baseUrl}/runtime/prompt-cache/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+    if (!response.ok) return null;
+    return response.json();
+  }
+
+  async *streamChat({ model, messages, options, signal, cache }) {
     const images = imagePathsFromMessages(messages);
     const targetModel = this.isMlxModel(model) ? (model || this.modelName) : this.modelName;
     let response;
@@ -183,7 +217,8 @@ export class MlxClient {
           model: targetModel,
           messages,
           images,
-          options
+          options,
+          cache
         }),
         signal
       });
@@ -215,6 +250,7 @@ export class MlxClient {
           if (!trimmed) continue;
           const chunk = JSON.parse(trimmed);
           if (chunk.type === 'error' || chunk.error) throw new MlxStreamError(chunk.message || chunk.error);
+          if (chunk.type === 'meta') yield { type: 'meta', ...chunk };
           if (chunk.delta) yield { type: 'token', delta: chunk.delta };
           if (chunk.type === 'done' || chunk.done) {
             sawDone = true;
@@ -226,6 +262,7 @@ export class MlxClient {
       if (tail) {
         const chunk = JSON.parse(tail);
         if (chunk.type === 'error' || chunk.error) throw new MlxStreamError(chunk.message || chunk.error);
+        if (chunk.type === 'meta') yield { type: 'meta', ...chunk };
         if (chunk.delta) yield { type: 'token', delta: chunk.delta };
         if (chunk.type === 'done' || chunk.done) {
           sawDone = true;
@@ -284,6 +321,9 @@ export class HybridModelClient {
   }
 
   async completeChat(request) {
+    if (this.mlx?.isMlxModel?.(request?.model)) {
+      return this.mlx.completeChat(request);
+    }
     return this.ollama.completeChat(request);
   }
 
@@ -305,6 +345,10 @@ export class HybridModelClient {
       // Keep response successful if at least MLX was handled.
     }
     return { unloaded: unloaded.filter(Boolean), count };
+  }
+
+  async clearPromptCache(options = {}) {
+    return this.mlx?.clearPromptCache?.(options) || null;
   }
 
   backendForModel(model) {

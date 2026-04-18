@@ -217,11 +217,12 @@ export class WebSearchClient {
     };
   }
 
-  async search(query, { maxResults, signal } = {}) {
+  async search(query, { maxResults, fetchPages = null, signal } = {}) {
     const startedAt = Date.now();
     const provider = this.config.searchProvider || 'searxng';
     const limit = Math.max(1, Math.min(10, Number(maxResults || this.config.searchMaxResults || 5)));
-    const pageLimit = Math.max(0, Math.min(limit, Number(this.config.searchFetchPages || 0)));
+    const configuredPageLimit = fetchPages == null ? Number(this.config.searchFetchPages || 0) : Number(fetchPages || 0);
+    const pageLimit = Math.max(0, Math.min(limit, configuredPageLimit));
     const normalizedQuery = String(query || '').trim();
     if (!normalizedQuery) {
       return { provider, results: [], skipped: 'empty_query', message: 'Search query is empty.', elapsedMs: Date.now() - startedAt };
@@ -280,19 +281,7 @@ export class WebSearchClient {
       if (!results.length) {
         return { provider, results: [], skipped: 'no_results', message: 'No search results found.', elapsedMs: Date.now() - startedAt };
       }
-      const fetched = await Promise.all(results.slice(0, pageLimit).map((result) => this.fetchPage(result, signal)));
-      const fetchedByUrl = new Map(fetched.filter(Boolean).map((page) => [page.url, page]));
-      const merged = results.map((result) => {
-        const page = fetchedByUrl.get(result.url);
-        if (!page) return { ...result, content: truncate(result.content, this.config.searchMaxPageChars), fetched: false };
-        return {
-          ...result,
-          title: page.title || result.title,
-          content: truncate(page.text || result.content, this.config.searchMaxPageChars),
-          pageDescription: page.description,
-          fetched: true
-        };
-      });
+      const merged = await this.fetchPagesForResults(results, { limit: pageLimit, signal });
       const output = {
         provider,
         results: merged,
@@ -327,6 +316,37 @@ export class WebSearchClient {
     }
   }
 
+  async fetchPagesForResults(results = [], { limit = 0, signal } = {}) {
+    const pageLimit = Math.max(0, Math.min(results.length, Number(limit || 0)));
+    if (!pageLimit) {
+      return results.map((result) => ({
+        ...result,
+        content: truncate(result.content || result.snippet || '', this.config.searchMaxPageChars),
+        fetched: Boolean(result.fetched)
+      }));
+    }
+
+    const fetched = await Promise.all(results.slice(0, pageLimit).map((result) => this.fetchPage(result, signal)));
+    const fetchedByUrl = new Map(fetched.filter(Boolean).map((page) => [page.url, page]));
+    return results.map((result) => {
+      const page = fetchedByUrl.get(result.url);
+      if (!page) {
+        return {
+          ...result,
+          content: truncate(result.content || result.snippet || '', this.config.searchMaxPageChars),
+          fetched: Boolean(result.fetched)
+        };
+      }
+      return {
+        ...result,
+        title: page.title || result.title,
+        content: truncate(page.text || result.content || result.snippet || '', this.config.searchMaxPageChars),
+        pageDescription: page.description,
+        fetched: true
+      };
+    });
+  }
+
   async fetchPageFresh(result, signal) {
     const timeout = timeoutSignal(this.config.searchPageTimeoutMs, signal);
     try {
@@ -357,7 +377,7 @@ export function formatSearchResultsForContext(results, maxChars = 12000) {
   const rendered = (results || []).map((result, index) => {
     const title = result.title || 'Untitled result';
     const url = result.url || 'No URL';
-    const content = truncate(result.content || result.snippet || '', 1400);
+    const content = truncate(result.content || result.snippet || '', 650);
     return `${index + 1}. ${title}\nURL: ${url}${content ? `\nContent: ${content}` : ''}`;
   }).join('\n\n');
   return truncate(rendered, maxChars);

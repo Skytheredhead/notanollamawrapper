@@ -25,7 +25,7 @@ function parseSse(text) {
     });
 }
 
-function makeHarness(env = {}, ollamaOverrides = {}, searchClient = null) {
+function makeHarness(env = {}, ollamaOverrides = {}, searchClient = null, extras = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'naow-routes-'));
   const config = loadConfig({
     NAOW_DB_PATH: path.join(dir, 'test.sqlite'),
@@ -59,7 +59,8 @@ function makeHarness(env = {}, ollamaOverrides = {}, searchClient = null) {
     db,
     ollama,
     generationManager: new GenerationManager(),
-    searchClient
+    searchClient,
+    ...extras
   });
 
   return {
@@ -160,6 +161,24 @@ test('chat routes create, list, and load chats', async () => {
     assert.equal(load.statusCode, 200);
     assert.equal(load.json().chat.systemPrompt, 'Answer concisely.');
     assert.deepEqual(load.json().messages, []);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('chat route applies the default naow prompt when no prompt is provided', async () => {
+  const harness = makeHarness();
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        title: 'Prompt default',
+        model: 'llama3.2:latest'
+      }
+    });
+    assert.equal(create.statusCode, 201);
+    assert.match(create.json().chat.systemPrompt, /You are naow/);
   } finally {
     await harness.cleanup();
   }
@@ -311,6 +330,68 @@ test('message route forwards generation options to Ollama', async () => {
   }
 });
 
+test('message route forwards prompt cache metadata and persists runner timings', async () => {
+  let receivedCache;
+  const harness = makeHarness({}, {
+    backendForModel() {
+      return { id: 'mlx', label: 'MLX' };
+    },
+    async *streamChat({ cache }) {
+      receivedCache = cache;
+      yield {
+        type: 'meta',
+        chatTemplateMs: 12,
+        promptChars: 456,
+        promptTokens: 78,
+        promptCache: {
+          enabled: true,
+          hit: true,
+          reusedTokens: 42,
+          newTokens: 11
+        }
+      };
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'mlx-community/Qwen3.5-9B-MLX-4bit'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'hello',
+        webSearch: false
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(receivedCache.usePromptCache, true);
+    assert.equal(receivedCache.chatId, chat.id);
+    assert.equal(receivedCache.cacheBranchId, 'main');
+    assert.equal(typeof receivedCache.systemPromptHash, 'string');
+    const complete = parseSse(response.payload).at(-1).data.message;
+    assert.equal(complete.metrics.promptBuildMs, 12);
+    assert.equal(complete.metrics.promptChars, 456);
+    assert.equal(complete.metrics.promptTokens, 78);
+    assert.equal(complete.metrics.promptCacheHit, true);
+    assert.equal(complete.metrics.promptCacheReusedTokens, 42);
+    assert.equal(complete.metrics.promptCacheNewTokens, 11);
+    assert.equal(complete.metrics.searchMode, 'none');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('message route adds web search context when enabled and available', async () => {
   let receivedQuery;
   let receivedMaxResults;
@@ -372,10 +453,243 @@ test('message route adds web search context when enabled and available', async (
     assert.equal(complete.metrics.webSearch.resultCount, 1);
     assert.equal(complete.metrics.sources[0].url, 'https://example.com/result');
     const searchEvent = events.find((event) => event.event === 'web_search');
-    assert.equal(searchEvent.data.display.title, 'Web Search');
-    assert.equal(searchEvent.data.display.links[0].url, 'https://example.com/result');
-    assert.equal(complete.metrics.toolCards[0].display.links[0].url, 'https://example.com/result');
+    assert.equal(searchEvent, undefined);
+    assert.equal(complete.metrics.toolCards.some((card) => card.name === 'web_search'), false);
     assert.equal(typeof complete.metrics.generationMs, 'number');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('message route in normal search mode skips search when classifier says it is not needed', async () => {
+  let normalSearchCalled = false;
+  let receivedMessages;
+  const searchClient = {
+    async search() {
+      normalSearchCalled = true;
+      return { provider: 'searxng', results: [] };
+    }
+  };
+  const preSearchManager = {
+    async classifySubmitted(query) {
+      assert.equal(query, 'Tell me a short joke');
+      return { shouldSearch: false, confidence: 0.93, queries: [] };
+    }
+  };
+  const harness = makeHarness({}, {
+    async *streamChat({ messages }) {
+      receivedMessages = messages;
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  }, searchClient, { preSearchManager });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'Tell me a short joke',
+        searchStrategy: 'normal'
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(normalSearchCalled, false);
+    assert.equal(receivedMessages.some((message) => /Web search results/.test(message.content || '')), false);
+    const events = parseSse(response.payload);
+    const complete = events.at(-1).data.message;
+    assert.equal(complete.metrics.webSearch.used, false);
+    assert.equal(complete.metrics.webSearch.skipped, 'not_needed');
+    assert.equal(complete.metrics.webSearch.classified, true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('message route in normal search mode searches when classifier requests it', async () => {
+  let receivedQuery;
+  const searchClient = {
+    async search(query) {
+      receivedQuery = query;
+      return {
+        provider: 'searxng',
+        resultCount: 1,
+        results: [{
+          title: 'Current result',
+          url: 'https://example.com/current',
+          content: 'Fresh context.'
+        }]
+      };
+    }
+  };
+  const preSearchManager = {
+    async classifySubmitted(query) {
+      assert.equal(query, 'What is new in Qwen today?');
+      return { shouldSearch: true, confidence: 0.91, queries: ['Qwen news today'] };
+    }
+  };
+  const harness = makeHarness({}, {
+    async *streamChat() {
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  }, searchClient, { preSearchManager });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'What is new in Qwen today?',
+        searchStrategy: 'normal'
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(receivedQuery, 'Qwen news today');
+    const events = parseSse(response.payload);
+    const complete = events.at(-1).data.message;
+    assert.equal(complete.metrics.webSearch.used, true);
+    assert.equal(complete.metrics.webSearch.classified, true);
+    assert.equal(complete.metrics.webSearch.searchStrategy, 'normal');
+    assert.equal(complete.metrics.sources[0].url, 'https://example.com/current');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('message route consumes matching pre-search results without emitting search cards', async () => {
+  let normalSearchCalled = false;
+  let receivedMessages;
+  const searchClient = {
+    async search() {
+      normalSearchCalled = true;
+      return { provider: 'searxng', results: [] };
+    }
+  };
+  const preSearchManager = {
+    consume({ preSearchId, finalQuery }) {
+      assert.equal(preSearchId, 'pre_ready');
+      assert.equal(finalQuery, 'What are the latest MLX releases today?');
+      return {
+        result: {
+          provider: 'searxng',
+          results: [{
+            title: 'Pre result',
+            url: 'https://example.com/pre',
+            content: 'Warmed context.'
+          }],
+          fetchedCount: 0,
+          elapsedMs: 0,
+          draftFinalSimilarity: 1
+        }
+      };
+    }
+  };
+  const harness = makeHarness({}, {
+    async *streamChat({ messages }) {
+      receivedMessages = messages;
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  }, searchClient, { preSearchManager });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'What are the latest MLX releases today?',
+        preSearchId: 'pre_ready'
+      }
+    });
+
+    const events = parseSse(response.payload);
+    const complete = events.at(-1).data.message;
+    assert.equal(response.statusCode, 200);
+    assert.equal(normalSearchCalled, false);
+    assert.match(receivedMessages[0].content, /https:\/\/example\.com\/pre/);
+    assert.equal(events.find((event) => event.event === 'web_search'), undefined);
+    assert.equal(complete.metrics.webSearch.fromPreSearch, true);
+    assert.equal(complete.metrics.sources[0].url, 'https://example.com/pre');
+    assert.equal(complete.metrics.toolCards.some((card) => card.name === 'web_search'), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('edit message route replaces the edited user turn and following context', async () => {
+  let receivedMessages;
+  const harness = makeHarness({}, {
+    async *streamChat({ messages }) {
+      receivedMessages = messages;
+      yield { type: 'token', delta: 'edited answer' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'llama3.2:latest'
+      }
+    });
+    const chat = create.json().chat;
+    const oldUser = harness.db.createUserMessage(chat.id, 'old question');
+    const oldAssistant = harness.db.createAssistantMessage(chat.id, 'old_generation');
+    harness.db.finalizeMessage(oldAssistant.id, {
+      content: 'old answer',
+      status: 'complete'
+    });
+    harness.db.createUserMessage(chat.id, 'context that should be removed');
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages/${oldUser.id}/edit`,
+      payload: {
+        content: 'edited question',
+        model: 'llama3.2:latest',
+        webSearch: false
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(receivedMessages.some((message) => message.content === 'old answer'), false);
+    assert.equal(receivedMessages.at(-1).content, 'edited question');
+    const visible = harness.db.getMessages(chat.id);
+    assert.deepEqual(visible.map((message) => message.content), ['edited question', 'edited answer']);
+    const replaced = harness.db.getMessages(chat.id, { includeReplaced: true }).filter((message) => message.status === 'replaced');
+    assert.equal(replaced.length, 3);
   } finally {
     await harness.cleanup();
   }
@@ -642,7 +956,7 @@ test('message route emits skipped web search event and still streams', async () 
     const events = parseSse(response.payload);
 
     assert.equal(response.statusCode, 200);
-    assert.equal(events.find((event) => event.event === 'web_search').data.used, false);
+    assert.equal(events.find((event) => event.event === 'web_search'), undefined);
     assert.equal(events.at(-1).event, 'message_complete');
     assert.equal(events.at(-1).data.message.content, 'ok');
     assert.equal(receivedMessages.some((message) => /Web search results/.test(message.content)), false);

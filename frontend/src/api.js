@@ -126,6 +126,34 @@ const realAdapter = {
     return r.json()
   },
 
+  async preSearchAnalyze(chatId, draft, options = {}, signal) {
+    const r = await fetch(`${BASE}/presearch/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatId,
+        draft,
+        enabled: options.enabled !== false,
+        webSearch: options.webSearch !== false,
+        hasAttachments: Boolean(options.hasAttachments),
+        previousPreSearchId: options.previousPreSearchId || null,
+      }),
+      signal,
+    })
+    if (!r.ok) throw new Error(`preSearchAnalyze: ${r.status}`)
+    return r.json()
+  },
+
+  async summarizeSources(sources = []) {
+    const r = await fetch(`${BASE}/sources/summarize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources }),
+    })
+    if (!r.ok) throw new Error(`summarizeSources: ${r.status}`)
+    return r.json()
+  },
+
   async listChats() {
     const r = await fetch(`${BASE}/chats`)
     if (!r.ok) throw new Error(`listChats: ${r.status}`)
@@ -150,7 +178,7 @@ const realAdapter = {
     return r.json()
   },
 
-  sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError, tools, onToolEvent) {
+  sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError, tools, onToolEvent, preSearchId = null, searchStrategy = 'normal') {
     const ctrl = new AbortController()
     ;(async () => {
       try {
@@ -162,11 +190,13 @@ const realAdapter = {
           body.append('model', model || '')
           body.append('options', JSON.stringify(options || {}))
           body.append('webSearch', String(webSearch))
+          if (preSearchId) body.append('preSearchId', preSearchId)
+          body.append('searchStrategy', searchStrategy)
           body.append('tools', JSON.stringify(tools || { enabled: true }))
           attachments.forEach((attachment) => body.append('attachments', attachment.file, attachment.name))
         } else {
           headers = { 'Content-Type': 'application/json' }
-          body = JSON.stringify({ content, model, options, webSearch, tools: tools || { enabled: true } })
+          body = JSON.stringify({ content, model, options, webSearch, tools: tools || { enabled: true }, preSearchId, searchStrategy })
         }
         const r = await fetch(`${BASE}/chats/${chatId}/messages`, {
           method: 'POST',
@@ -195,17 +225,61 @@ const realAdapter = {
 
   stopGeneration(ctrl) { ctrl?.abort() },
 
-  regenerate(chatId, model, options, webSearch, onToken, onDone, onError, tools, onToolEvent) {
+  regenerate(chatId, model, options, webSearch, onToken, onDone, onError, tools, onToolEvent, regenerateOptions = {}) {
     const ctrl = new AbortController()
     ;(async () => {
       try {
         const r = await fetch(`${BASE}/chats/${chatId}/regenerate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, options, webSearch, tools: tools || { enabled: true } }),
+          body: JSON.stringify({
+            model,
+            options,
+            webSearch,
+            tools: tools || { enabled: true },
+            messageId: regenerateOptions.messageId || null,
+            searchMode: regenerateOptions.searchMode || 'normal',
+            searchStrategy: regenerateOptions.searchStrategy || 'normal',
+          }),
           signal: ctrl.signal,
         })
         if (!r.ok) throw new Error(`regenerate: ${r.status}`)
+        for await (const chunk of readStream(r)) {
+          if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
+          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search') {
+            onToolEvent?.(chunk)
+          }
+          const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
+          if (tok) onToken(tok)
+          if (chunk.done || chunk.event === 'message_complete') { onDone(chunk); return }
+        }
+        onDone({})
+      } catch (e) {
+        if (e.name === 'AbortError') onDone({ aborted: true })
+        else onError(e)
+      }
+    })()
+    return ctrl
+  },
+
+  editMessage(chatId, messageId, content, model, options, webSearch, onToken, onDone, onError, tools, onToolEvent, editOptions = {}) {
+    const ctrl = new AbortController()
+    ;(async () => {
+      try {
+        const r = await fetch(`${BASE}/chats/${chatId}/messages/${messageId}/edit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content,
+            model,
+            options,
+            webSearch,
+            tools: tools || { enabled: true },
+            searchStrategy: editOptions.searchStrategy || 'normal',
+          }),
+          signal: ctrl.signal,
+        })
+        if (!r.ok) throw new Error(`editMessage: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
           if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search') {

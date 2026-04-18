@@ -32,6 +32,11 @@ const RESIDENCY_OPTIONS = [
   ['unload_after_reply', 'Unload after reply'],
 ]
 
+const SEARCH_STRATEGY_OPTIONS = [
+  ['normal', 'Normal'],
+  ['pre-search', 'Pre-search'],
+]
+
 const EMPTY_PROMPTS = [
   ['Start clean.', 'One thought at a time.'],
   ['What are we making?', 'Drop the first piece here.'],
@@ -133,9 +138,16 @@ function metricsText(metrics, now, streaming = false) {
     const parts = [
       `${rate} tok/s`,
       `first token ${Number.isFinite(metrics.firstTokenMs) ? formatMetric(metrics.firstTokenMs) : 'waiting'}`,
-      `total ${formatMetric(metrics.generationMs)}`,
     ]
+    if (Number.isFinite(metrics.promptBuildMs) && metrics.promptBuildMs > 25) {
+      parts.push(`prompt ${formatMetric(metrics.promptBuildMs)}`)
+    }
+    if (Number.isFinite(metrics.modelFirstTokenMs) && metrics.modelFirstTokenMs > 250) {
+      parts.push(`prefill ${formatMetric(metrics.modelFirstTokenMs)}`)
+    }
     if (Number(metrics.webSearchMs) > 0) parts.push(`search ${formatMetric(metrics.webSearchMs)}`)
+    if (Number(metrics.webSearch?.classifierMs) > 250) parts.push(`gate ${formatMetric(metrics.webSearch.classifierMs)}`)
+    parts.push(`total ${formatMetric(metrics.generationMs)}`)
     return parts.join(' · ')
   }
   const end = streaming ? now : (metrics.updatedAt || now)
@@ -145,25 +157,214 @@ function metricsText(metrics, now, streaming = false) {
   return `${rate} tok/s · first token ${ttft}`
 }
 
+function IconSources() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 6.5h10" />
+      <path d="M7 11.5h10" />
+      <path d="M7 16.5h6" />
+      <path d="M5 3.5h14a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19V5A1.5 1.5 0 0 1 5 3.5Z" />
+    </svg>
+  )
+}
+
+function IconCopy() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 8h10v10H8z" />
+      <path d="M6 16H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+    </svg>
+  )
+}
+
+function IconCheck() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m5 12.5 4.3 4.2L19 7" />
+    </svg>
+  )
+}
+
+function IconRegenerate() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M18.5 8.5A7 7 0 0 0 6 7.2" />
+      <path d="M6 4.5v2.7h2.7" />
+      <path d="M5.5 15.5A7 7 0 0 0 18 16.8" />
+      <path d="M18 19.5v-2.7h-2.7" />
+    </svg>
+  )
+}
+
+function IconPencil() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m4 16.5-.5 4 4-.5L18.8 8.7l-3.5-3.5L4 16.5Z" />
+      <path d="m13.8 6.7 3.5 3.5" />
+    </svg>
+  )
+}
+
+function IconX() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 7l10 10" />
+      <path d="M17 7 7 17" />
+    </svg>
+  )
+}
+
 function MessageMetrics({ metrics, now, streaming }) {
   const showMetrics = useStore((s) => s.showMetrics)
+  const [sourcesOpen, setSourcesOpen] = useState(false)
+  const [sourceDetails, setSourceDetails] = useState(null)
+  const [loadingSources, setLoadingSources] = useState(false)
   if (!showMetrics || !metrics) return null
-  const sources = Array.isArray(metrics.sources) ? metrics.sources.filter((source) => source?.url).slice(0, 5) : []
+  const sources = Array.isArray(metrics.sources) ? metrics.sources.filter((source) => source?.url).slice(0, 10) : []
+  const faviconForSource = (source) => {
+    if (source.faviconUrl) return source.faviconUrl
+    try {
+      return `${new URL(source.url).origin}/favicon.ico`
+    } catch {
+      return ''
+    }
+  }
+  const openSources = async () => {
+    const nextOpen = !sourcesOpen
+    setSourcesOpen(nextOpen)
+    if (!nextOpen || sourceDetails || loadingSources || !sources.length) return
+    setLoadingSources(true)
+    try {
+      const result = await adapter.summarizeSources?.(sources)
+      setSourceDetails(result?.sources || sources)
+    } catch {
+      setSourceDetails(sources)
+    } finally {
+      setLoadingSources(false)
+    }
+  }
   return (
     <div className="messageMetrics">
       <span>{metricsText(metrics, now, streaming)}</span>
       {sources.length > 0 && (
-        <span className="messageSources">
-          {' · sources '}
-          {sources.map((source, index) => (
-            <React.Fragment key={`${source.url}-${index}`}>
-              {index > 0 ? ', ' : ''}
-              <a href={source.url} target="_blank" rel="noreferrer">{index + 1}</a>
-            </React.Fragment>
-          ))}
+        <span className="messageSourcesWrap">
+          <span className="messageMetricActionSpacer" aria-hidden="true" />
+          <button type="button" className="sourcesButton iconOnlyButton" onClick={openSources} aria-label="Sources" title="Sources">
+            <IconSources />
+          </button>
+          {sourcesOpen && (
+            <>
+            <span className="sourcesPopoverBackdrop" onClick={() => setSourcesOpen(false)} aria-hidden="true" />
+            <span className="sourcesPopover" role="dialog" aria-label="Sources">
+              <span className="sourcesPopoverHeader">
+                <strong>Sources</strong>
+                <button type="button" onClick={() => setSourcesOpen(false)} aria-label="Close sources">×</button>
+              </span>
+              {loadingSources && <span className="sourcesLoading">Summarizing...</span>}
+              {(sourceDetails || sources).map((source, index) => (
+                <a className={`sourceResult ${index === 0 ? 'isPrimary' : ''}`} href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
+                  {faviconForSource(source) && <img src={faviconForSource(source)} alt="" onError={(event) => { event.currentTarget.style.visibility = 'hidden' }} />}
+                  <span>
+                    <strong>{source.title || source.url}</strong>
+                    <small>{source.domain || source.url}</small>
+                    <em>{source.summary || source.snippet || 'No summary available.'}</em>
+                  </span>
+                </a>
+              ))}
+            </span>
+            </>
+          )}
         </span>
       )}
     </div>
+  )
+}
+
+function MessageActions({ message, onRegenerate }) {
+  const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content || message.error || '')
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      setCopied(false)
+    }
+  }
+  if (message.role !== 'assistant') return null
+  const regenerate = (mode) => {
+    setOpen(false)
+    onRegenerate?.(message.id, mode)
+  }
+  return (
+    <div className="messageActions">
+      <button type="button" className="iconOnlyButton" onClick={copy} aria-label={copied ? 'Copied' : 'Copy'} title={copied ? 'Copied' : 'Copy'}>
+        {copied ? <IconCheck /> : <IconCopy />}
+      </button>
+      <span className="regenerateWrap">
+        <button type="button" className="iconOnlyButton" onClick={() => setOpen((value) => !value)} aria-label="Regenerate" title="Regenerate">
+          <IconRegenerate />
+        </button>
+        {open && (
+          <span className="regenerateMenu">
+            <button type="button" onClick={() => regenerate('normal')}>Regenerate</button>
+            <button type="button" onClick={() => regenerate('extra')}>Extra search</button>
+          </span>
+        )}
+      </span>
+    </div>
+  )
+}
+
+function UserMessageBubble({ message, onEditUserMessage }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(message.content || '')
+
+  useEffect(() => {
+    if (!editing) setDraft(message.content || '')
+  }, [message.content, editing])
+
+  const cancel = () => {
+    setDraft(message.content || '')
+    setEditing(false)
+  }
+
+  const submit = (event) => {
+    event.preventDefault()
+    const next = draft.trim()
+    if (!next || next === (message.content || '').trim()) {
+      cancel()
+      return
+    }
+    setEditing(false)
+    onEditUserMessage?.(message.id, next)
+  }
+
+  return (
+    <>
+      <AttachmentStrip attachments={message.attachments} />
+      {editing ? (
+        <form className="userEditForm" onSubmit={submit}>
+          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} autoFocus />
+          <span className="userEditControls">
+            <button type="button" className="iconOnlyButton" onClick={cancel} aria-label="Cancel edit" title="Cancel">
+              <IconX />
+            </button>
+            <button type="submit" className="iconOnlyButton" aria-label="Submit edit" title="Submit">
+              <IconCheck />
+            </button>
+          </span>
+        </form>
+      ) : (
+        <>
+          <MessageContent content={message.content || message.error || ''} />
+          <button type="button" className="userEditButton iconOnlyButton" onClick={() => setEditing(true)} aria-label="Edit message" title="Edit">
+            <IconPencil />
+          </button>
+        </>
+      )}
+    </>
   )
 }
 
@@ -464,7 +665,18 @@ function SearchBox({ chats, onSelect }) {
 
   return (
     <div className="searchWrap">
-      <input ref={inputRef} className="searchInput" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search chats" />
+      <svg className="searchIcon" viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="8.5" cy="8.5" r="5.25" />
+        <path d="M12.5 12.5 17 17" />
+      </svg>
+      <input ref={inputRef} className="searchInput" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="" aria-label="Search chats" />
+      {!query && (
+        <span className="searchPlaceholder" aria-hidden="true">
+          <span className="cmdSymbol">⌘</span>
+          <span className="shortcutPlus">+</span>
+          <span>F</span>
+        </span>
+      )}
       {results.length > 0 && (
         <div className="searchResults">
           {results.map((result, i) => (
@@ -682,6 +894,8 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
   const setShowMetrics = useStore((s) => s.setShowMetrics)
   const webSearchEnabled = useStore((s) => s.webSearchEnabled)
   const setWebSearchEnabled = useStore((s) => s.setWebSearchEnabled)
+  const searchStrategy = useStore((s) => s.searchStrategy)
+  const setSearchStrategy = useStore((s) => s.setSearchStrategy)
   const contextSize = useStore((s) => s.contextSize)
   const setContextSize = useStore((s) => s.setContextSize)
   const modelResidency = useStore((s) => s.modelResidency)
@@ -748,7 +962,12 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
 
   return (
     <div className="settingsWrap" ref={wrapRef}>
-      <button className="iconButton" onClick={() => setOpen((v) => !v)} aria-label="Settings">Settings</button>
+      <button className="iconButton settingsButton" onClick={() => setOpen((v) => !v)} aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Z" />
+          <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.4-2.4 1a8.6 8.6 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.6A8.6 8.6 0 0 0 7 6.6l-2.4-1-2 3.4 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.4 2.4-1a8.6 8.6 0 0 0 2.6 1.5l.4 2.6h4l.4-2.6a8.6 8.6 0 0 0 2.6-1.5l2.4 1 2-3.4-2-1.5Z" />
+        </svg>
+      </button>
       {renderPanel && (
         <section className={`settingsPanel ${closing ? 'isClosing' : ''}`}>
           <div className="settingsTitle">Settings</div>
@@ -769,6 +988,7 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
             <span className="customCheck" aria-hidden="true" />
             <span>Allow web search</span>
           </label>
+          <SelectControl id="searchStrategy" label="Search mode" value={searchStrategy} onChange={setSearchStrategy} options={SEARCH_STRATEGY_OPTIONS} {...selectProps} open={openSelect === 'searchStrategy'} />
           <LocalSearchStatus open={open} />
           <button className="settingsActionButton" type="button" onClick={handleUnloadModels} disabled={unloadState.loading}>
             {unloadState.loading ? 'Unloading...' : 'Unload models'}
@@ -806,7 +1026,7 @@ function shouldPollModelDownloadStatus(status, preflight, dismissed) {
   return runtimeBlocked || needsInitialModel || missingModels.length > 0 || ['error', 'unavailable'].includes(status?.status)
 }
 
-function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, streamToolCards, isStreaming, now, wallNow, userName }) {
+function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, streamToolCards, isStreaming, now, wallNow, userName, onRegenerate, onEditUserMessage }) {
   const bottomRef = useRef(null)
   const emptyPrompt = promptForChat(chatId, userName)
   useEffect(() => {
@@ -824,10 +1044,19 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
         )}
         {messages.map((message) => (
           <section key={message.id} className={`message ${message.role} ${message.status === 'error' ? 'isError' : ''}`}>
-            <AttachmentStrip attachments={message.attachments} />
-            <MessageContent content={message.content || message.error || ''} />
-            {message.role === 'assistant' && <MessageToolCards message={message} now={wallNow} />}
-            {message.role === 'assistant' && <MessageMetrics metrics={message.metrics} now={now} />}
+            {message.role === 'user' ? (
+              <UserMessageBubble message={message} onEditUserMessage={onEditUserMessage} />
+            ) : (
+              <>
+                <AttachmentStrip attachments={message.attachments} />
+                <MessageContent content={message.content || message.error || ''} />
+                <MessageToolCards message={message} now={wallNow} />
+                <div className="messageFooter">
+                  <MessageMetrics metrics={message.metrics} now={now} />
+                  <MessageActions message={message} onRegenerate={onRegenerate} />
+                </div>
+              </>
+            )}
           </section>
         ))}
         {active && isStreaming && (
@@ -954,7 +1183,7 @@ export default function App() {
     models, selectedModel, setSelectedModel,
     chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, queuedMessages,
     streamToolCards,
-    input, setInput, pendingAttachments, loadModels, loadChats, selectChat, newChat, unloadModels, sendMessage, stopGeneration, handleKeyDown,
+    input, setInput, pendingAttachments, loadModels, loadChats, selectChat, newChat, unloadModels, sendMessage, stopGeneration, regenerate, editUserMessage, handleKeyDown,
   } = useChat()
   const addPendingAttachments = useStore((s) => s.addPendingAttachments)
   const removePendingAttachment = useStore((s) => s.removePendingAttachment)
@@ -1082,6 +1311,8 @@ export default function App() {
             now={now}
             wallNow={wallNow}
             userName={userName}
+            onRegenerate={regenerate}
+            onEditUserMessage={editUserMessage}
           />
         </div>
         <button className="newThreadButton" onClick={() => openNewThread()} aria-label="New thread">
@@ -1090,7 +1321,6 @@ export default function App() {
       </main>
 
       <footer className="composer">
-        <BackendStats selectedModel={selectedModel} active={isStreaming} />
         {currentQueue.length > 0 && (
           <div className="queueShelf" aria-live="polite">
             <span className="queueLabel">{currentQueue.length === 1 ? 'Queued next' : `${currentQueue.length} queued`}</span>
@@ -1145,7 +1375,7 @@ export default function App() {
             onKeyDown={handleKeyDown}
             onPaste={(event) => addImageFiles(event.clipboardData?.files)}
             disabled={!currentChat}
-            placeholder={isStreaming ? 'Queue the next message' : (userName ? `Message naow, ${userName}` : 'Message naow')}
+            placeholder={isStreaming ? 'Queue the next message' : 'Message naow'}
             rows={1}
             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 138)}px` }}
           />
@@ -1153,6 +1383,7 @@ export default function App() {
             <button className="sendButton" onClick={handleComposerAction}>{actionLabel}</button>
           </div>
         </div>
+        <BackendStats selectedModel={selectedModel} active={isStreaming} />
       </footer>
     </div>
   )

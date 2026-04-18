@@ -57,7 +57,7 @@ MODEL_SPECS = {
         parameter_size="26B",
         quantization="4bit",
         backend="vlm",
-        pinned=True,
+        pinned=False,
     ),
     GPT_OSS_KEY: ModelSpec(
         key=GPT_OSS_KEY,
@@ -80,6 +80,7 @@ MODEL_SPECS = {
         parameter_size="0.6B",
         quantization="4bit-DWQ",
         backend="lm",
+        pinned=True,
     ),
 }
 

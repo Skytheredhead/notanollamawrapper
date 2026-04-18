@@ -73,6 +73,17 @@ const mockAdapter = {
   async startMlxModelDownload() { return this.mlxModelsStatus() },
   async mlxModelDownloadStatus() { return this.mlxModelsStatus() },
   async openMlxModelsFolder() { return { opened: true, path: 'mock' } },
+  async preSearchAnalyze() { return { used: false, skipped: 'mock' } },
+  async summarizeSources(sources = []) {
+    return {
+      sources: sources.map((source) => ({
+        ...source,
+        domain: source.domain || 'example.com',
+        faviconUrl: source.faviconUrl || '',
+        summary: source.summary || source.snippet || 'Mock source summary.',
+      })),
+    }
+  },
 
   async listChats() {
     await sleep(40)
@@ -149,6 +160,15 @@ const mockAdapter = {
     })()
 
     return ctrl
+  },
+
+  editMessage(chatId, messageId, content, model, options, webSearch, onToken, onDone, onError) {
+    const chatMsgs = msgs[chatId] ?? []
+    const index = chatMsgs.findIndex((message) => message.id === messageId && message.role === 'user')
+    if (index >= 0) {
+      msgs[chatId] = [...chatMsgs.slice(0, index), { ...chatMsgs[index], content }]
+    }
+    return this.regenerate(chatId, model, options, webSearch, onToken, onDone, onError)
   },
 }
 

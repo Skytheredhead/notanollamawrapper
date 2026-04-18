@@ -7,6 +7,8 @@ import { HybridModelClient, MlxClient, MlxSidecar } from './mlx.js';
 import { OllamaClient } from './ollama.js';
 import { SearxngSidecar } from './search-sidecar.js';
 import { WebSearchClient } from './web-search.js';
+import { PreSearchManager } from './presearch-manager.js';
+import { SourceSummaryCache } from './source-summaries.js';
 
 const config = loadConfig();
 const db = new LocalDatabase(config.dbPath);
@@ -48,13 +50,24 @@ const searchClient = new WebSearchClient({
   config,
   sidecar: searchSidecar
 });
+const preSearchManager = new PreSearchManager({
+  config,
+  searchClient,
+  modelClient
+});
+const sourceSummaryCache = new SourceSummaryCache({
+  config,
+  modelClient
+});
 
 const app = buildApp({
   config,
   db,
   ollama: modelClient,
   generationManager,
-  searchClient
+  searchClient,
+  preSearchManager,
+  sourceSummaryCache
 });
 const idleGuard = new IdleResourceGuard({
   config,

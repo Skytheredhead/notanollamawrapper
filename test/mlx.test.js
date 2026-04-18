@@ -17,6 +17,7 @@ test('MLX client forwards image attachment paths to the runner', async () => {
         });
       }
       return new Response([
+        JSON.stringify({ type: 'meta', promptCache: { enabled: true, hit: true, reusedTokens: 12, newTokens: 3 } }),
         JSON.stringify({ type: 'token', delta: 'ok' }),
         JSON.stringify({ type: 'done', doneReason: 'stop' }),
         ''
@@ -42,15 +43,25 @@ test('MLX client forwards image attachment paths to the runner', async () => {
         ]
       }
     ],
-    options: { max_tokens: 4 }
+    options: { max_tokens: 4 },
+    cache: {
+      usePromptCache: true,
+      chatId: 'chat_1',
+      cacheBranchId: 'main',
+      systemPromptHash: 'abc',
+      attachmentSignature: 'image'
+    }
   })) {
     events.push(event);
   }
 
   const chatRequest = requests.find((request) => request.url.endsWith('/chat/stream'));
   assert.ok(chatRequest);
-  assert.deepEqual(JSON.parse(chatRequest.options.body).images, ['/tmp/pixel.png']);
+  const payload = JSON.parse(chatRequest.options.body);
+  assert.deepEqual(payload.images, ['/tmp/pixel.png']);
+  assert.equal(payload.cache.chatId, 'chat_1');
   assert.deepEqual(events, [
+    { type: 'meta', promptCache: { enabled: true, hit: true, reusedTokens: 12, newTokens: 3 } },
     { type: 'token', delta: 'ok' },
     { type: 'done', doneReason: 'stop' }
   ]);

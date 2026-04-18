@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { normalizeDefaultSystemPrompt } from './default-system-prompt.js';
 
 function rowToChat(row) {
   if (!row) return null;
@@ -9,7 +10,7 @@ function rowToChat(row) {
     id: row.id,
     title: row.title,
     model: row.model,
-    systemPrompt: row.system_prompt,
+    systemPrompt: normalizeDefaultSystemPrompt(row.system_prompt),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

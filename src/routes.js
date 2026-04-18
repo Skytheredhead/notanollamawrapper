@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -38,6 +39,11 @@ function optionsFromBody(body) {
 
 function webSearchFromBody(body) {
   return body?.webSearch !== false;
+}
+
+function searchStrategyFromBody(body) {
+  const value = String(body?.searchStrategy || '').trim().toLowerCase();
+  return value === 'pre-search' || value === 'presearch' ? 'pre-search' : 'normal';
 }
 
 function parseBooleanField(value, fallback = true) {
@@ -226,14 +232,77 @@ function backendForModel(ollama, model) {
   };
 }
 
-function sourceList(results = []) {
+function sourceList(results = [], limit = 5) {
   return results
     .filter((result) => result?.url)
-    .slice(0, 5)
+    .slice(0, limit)
     .map((result) => ({
       title: result.title || result.url,
-      url: result.url
+      url: result.url,
+      domain: domainForUrl(result.url),
+      faviconUrl: faviconForUrl(result.url),
+      snippet: result.content || result.snippet || result.pageDescription || ''
     }));
+}
+
+function hashPromptPart(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, 24);
+}
+
+function attachmentSignature(messages = []) {
+  const parts = [];
+  for (const message of messages) {
+    for (const attachment of message.attachments || []) {
+      parts.push([
+        attachment.type || '',
+        attachment.path || attachment.url || '',
+        attachment.sizeBytes || attachment.size || '',
+        attachment.mimeType || ''
+      ].join(':'));
+    }
+  }
+  return parts.length ? hashPromptPart(parts.sort().join('|')) : 'none';
+}
+
+function promptCacheOptions({ chat, model, messages, enabled = true, branchId = 'main' } = {}) {
+  return {
+    usePromptCache: Boolean(enabled),
+    chatId: chat?.id || null,
+    cacheBranchId: branchId || 'main',
+    systemPromptHash: hashPromptPart(chat?.systemPrompt || ''),
+    attachmentSignature: attachmentSignature(messages),
+    model
+  };
+}
+
+function domainForUrl(value) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function faviconForUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}/favicon.ico`;
+  } catch {
+    return '';
+  }
+}
+
+function dedupeSearchResults(results = []) {
+  const seen = new Set();
+  const output = [];
+  for (const result of results) {
+    if (!result?.url) continue;
+    const key = result.url.replace(/[#?].*$/, '').replace(/\/$/, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(result);
+  }
+  return output;
 }
 
 function buildMessageMetadata({
@@ -244,12 +313,17 @@ function buildMessageMetadata({
   searchContext = null,
   toolActions = [],
   toolCards = [],
+  modelMeta = null,
+  contextFetchMs = null,
+  messageSerializeMs = null,
   doneReason = null
 } = {}) {
   const finishedAt = Date.now();
   const generationMs = Math.max(0, finishedAt - requestStartedAt);
   const modelMs = modelStartedAt ? Math.max(0, finishedAt - modelStartedAt) : generationMs;
   const firstTokenMs = firstTokenAt ? Math.max(0, firstTokenAt - requestStartedAt) : null;
+  const preModelMs = modelStartedAt ? Math.max(0, modelStartedAt - requestStartedAt) : null;
+  const modelFirstTokenMs = firstTokenAt && modelStartedAt ? Math.max(0, firstTokenAt - modelStartedAt) : null;
   const tokensPerSecond = tokenCount > 0 ? Number((tokenCount / Math.max(modelMs / 1000, 0.001)).toFixed(1)) : null;
   const search = searchContext?.event ? {
     used: Boolean(searchContext.event.used),
@@ -258,7 +332,14 @@ function buildMessageMetadata({
     resultCount: Number(searchContext.event.resultCount || 0),
     fetchedCount: Number(searchContext.event.fetchedCount || 0),
     cacheHit: Boolean(searchContext.event.cacheHit),
-    skipped: searchContext.event.skipped || null
+    skipped: searchContext.event.skipped || null,
+    preSearchId: searchContext.event.preSearchId || null,
+    fromPreSearch: Boolean(searchContext.event.fromPreSearch),
+    searchMode: searchContext.event.searchMode || 'normal',
+    searchStrategy: searchContext.event.searchStrategy || 'normal',
+    classified: Boolean(searchContext.event.classified),
+    confidence: searchContext.event.confidence ?? null,
+    classifierMs: Number.isFinite(Number(searchContext.event.classifierMs)) ? Number(searchContext.event.classifierMs) : null
   } : null;
 
   return {
@@ -266,6 +347,8 @@ function buildMessageMetadata({
       generationMs,
       modelMs,
       firstTokenMs,
+      preModelMs,
+      modelFirstTokenMs,
       tokenCount,
       tokensPerSecond,
       doneReason,
@@ -273,12 +356,26 @@ function buildMessageMetadata({
       webSearch: search,
       sources: searchContext?.sources || [],
       toolCards: toolCards.slice(-8),
-      toolActions: toolActions.slice(-8)
+      toolActions: toolActions.slice(-8),
+      promptBuildMs: Number.isFinite(Number(modelMeta?.chatTemplateMs)) ? Number(modelMeta.chatTemplateMs) : null,
+      chatTemplateMs: Number.isFinite(Number(modelMeta?.chatTemplateMs)) ? Number(modelMeta.chatTemplateMs) : null,
+      promptChars: Number.isFinite(Number(modelMeta?.promptChars)) ? Number(modelMeta.promptChars) : null,
+      promptTokens: Number.isFinite(Number(modelMeta?.promptTokens)) ? Number(modelMeta.promptTokens) : null,
+      promptCacheHit: Boolean(modelMeta?.promptCache?.hit),
+      promptCacheEnabled: Boolean(modelMeta?.promptCache?.enabled),
+      promptCacheDisabledReason: modelMeta?.promptCache?.disabledReason || null,
+      promptCacheReusedTokens: Number.isFinite(Number(modelMeta?.promptCache?.reusedTokens)) ? Number(modelMeta.promptCache.reusedTokens) : null,
+      promptCacheNewTokens: Number.isFinite(Number(modelMeta?.promptCache?.newTokens)) ? Number(modelMeta.promptCache.newTokens) : null,
+      contextFetchMs,
+      messageSerializeMs,
+      searchMode: search?.used
+        ? (search.searchMode === 'extra' ? 'extra' : (search.fetchedCount > 0 ? 'full' : 'snippet'))
+        : 'none'
     }
   };
 }
 
-async function withWebSearchContext({ searchClient, config, messages, enabled, signal }) {
+async function withWebSearchContext({ searchClient, preSearchManager, config, messages, chatId, preSearchId, enabled, signal, searchMode = 'normal', searchStrategy = 'normal', extraSources = [] }) {
   if (!enabled) {
     return { messages, used: false };
   }
@@ -300,12 +397,72 @@ async function withWebSearchContext({ searchClient, config, messages, enabled, s
   const query = latestUserQuery(messages).trim();
   if (!query) return { messages, used: false };
 
+  const consumed = preSearchManager?.consume?.({ preSearchId, chatId, finalQuery: query });
+  if (consumed?.result?.results?.length && searchMode !== 'extra') {
+    const results = consumed.result.results;
+    return {
+      messages: insertSystemMessage(messages, formatWebSearchContext(results, config)),
+      used: true,
+      attempted: true,
+      resultCount: results.length,
+      sources: sourceList(results, searchMode === 'extra' ? 10 : 5),
+      event: {
+        used: true,
+        provider: consumed.result.provider || config.searchProvider,
+        resultCount: results.length,
+        fetchedCount: consumed.result.fetchedCount || 0,
+        cacheHit: true,
+        elapsedMs: consumed.result.elapsedMs || 0,
+        preSearchId,
+        fromPreSearch: true,
+        draftFinalSimilarity: consumed.result.draftFinalSimilarity,
+        searchMode,
+        searchStrategy
+      }
+    };
+  }
+
   try {
-    const search = await searchClient.search(query, {
-      maxResults: config.searchMaxResults || config.webSearchMaxResults,
+    let searchQuery = query;
+    let classifierEvent = {};
+    if (searchMode !== 'extra' && typeof preSearchManager?.classifySubmitted === 'function') {
+      const classifiedAt = Date.now();
+      const classification = await preSearchManager.classifySubmitted(query, signal);
+      const confidence = Number(classification?.confidence || 0);
+      classifierEvent = {
+        classified: true,
+        confidence,
+        searchStrategy,
+        classifierMs: Math.max(0, Date.now() - classifiedAt)
+      };
+      if (!classification?.shouldSearch || confidence < config.preSearchMinConfidence) {
+        return {
+          messages,
+          used: false,
+          attempted: true,
+          sources: [],
+          event: {
+            used: false,
+            provider: config.searchProvider,
+            skipped: classification?.skipped || 'not_needed',
+            message: 'Search was not needed.',
+            elapsedMs: classifierEvent.classifierMs,
+            ...classifierEvent
+          }
+        };
+      }
+      searchQuery = classification.queries?.[0] || query;
+    }
+
+    const maxResults = searchMode === 'extra' ? 10 : (config.searchMaxResults || config.webSearchMaxResults);
+    const search = await searchClient.search(searchQuery, {
+      maxResults,
+      fetchPages: searchMode === 'extra' ? 10 : 0,
       signal
     });
-    const results = search.results || [];
+    const results = searchMode === 'extra'
+      ? dedupeSearchResults([...(extraSources || []), ...(search.results || [])]).slice(0, 10)
+      : (search.results || []);
     if (!results.length) {
       return {
         messages,
@@ -317,7 +474,8 @@ async function withWebSearchContext({ searchClient, config, messages, enabled, s
           provider: search.provider || config.searchProvider,
           skipped: search.skipped || 'no_results',
           message: search.message || 'No search results found.',
-          elapsedMs: search.elapsedMs || 0
+          elapsedMs: search.elapsedMs || 0,
+          ...classifierEvent
         }
       };
     }
@@ -326,14 +484,17 @@ async function withWebSearchContext({ searchClient, config, messages, enabled, s
       used: true,
       attempted: true,
       resultCount: results.length,
-      sources: sourceList(results),
+      sources: sourceList(results, searchMode === 'extra' ? 10 : 5),
       event: {
         used: true,
         provider: search.provider || config.searchProvider,
         resultCount: search.resultCount || results.length,
         fetchedCount: search.fetchedCount || 0,
         cacheHit: Boolean(search.cacheHit),
-        elapsedMs: search.elapsedMs || 0
+        elapsedMs: search.elapsedMs || 0,
+        searchMode,
+        searchQuery,
+        ...classifierEvent
       }
     };
   } catch (error) {
@@ -369,7 +530,13 @@ async function streamAssistantReply({
   assistantMessage,
   entry,
   toolRuntime,
-  searchClient
+  searchClient,
+  preSearchManager,
+  preSearchId = null,
+  searchMode = 'normal',
+  searchStrategy = 'normal',
+  extraSources = [],
+  contextFetchMs = null
 }) {
   const response = startSse(reply);
   let content = '';
@@ -380,6 +547,8 @@ async function streamAssistantReply({
   let firstTokenAt = null;
   let tokenCount = 0;
   let searchContext = null;
+  let modelMeta = null;
+  let messageSerializeMs = null;
   const clientToolActions = [];
   const toolCards = [];
 
@@ -446,39 +615,18 @@ async function streamAssistantReply({
 
     searchContext = await withWebSearchContext({
       searchClient,
+      preSearchManager,
       config,
       messages: workingMessages,
+      chatId: chat.id,
+      preSearchId,
       enabled: webSearch,
-      signal: entry.abortController.signal
+      signal: entry.abortController.signal,
+      searchMode,
+      searchStrategy,
+      extraSources
     });
     workingMessages = searchContext.messages;
-
-    if (searchContext.event) {
-      const toolCallId = `web_search_${requestStartedAt}`;
-      const display = buildToolDisplay({
-        name: 'web_search',
-        result: {
-          ...searchContext.event,
-          results: searchContext.sources || []
-        },
-        source: `Local ${searchContext.event.provider || 'web'} search`,
-        cacheHit: Boolean(searchContext.event.cacheHit),
-        text: searchContext.event.message || ''
-      }, { maxChars: config.toolMaxResultChars });
-      upsertToolCard({
-        toolCallId,
-        name: 'web_search',
-        toolName: 'web_search',
-        status: searchContext.event.used ? 'complete' : 'skipped',
-        startedAt: requestStartedAt,
-        completedAt: Date.now(),
-        elapsedMs: Number(searchContext.event.elapsedMs || 0),
-        cacheHit: Boolean(searchContext.event.cacheHit),
-        source: `Local ${searchContext.event.provider || 'web'} search`,
-        display
-      });
-      await writeSse(response, 'web_search', { ...searchContext.event, toolCallId, display });
-    }
 
     const query = latestUserQuery(messages).trim();
     if (toolsOptions.enabled && query) {
@@ -550,6 +698,8 @@ async function streamAssistantReply({
               searchContext,
               toolActions: clientToolActions,
               toolCards,
+              modelMeta,
+              contextFetchMs,
               doneReason: 'tool_result'
             })
           });
@@ -586,41 +736,46 @@ async function streamAssistantReply({
           const startedAt = Date.now();
           try {
             const preview = argsPreview(parsedArgs);
-            upsertToolCard({
-              toolCallId,
-              name,
-              toolName: name,
-              status: 'running',
-              startedAt,
-              argsPreview: preview
-            });
-            await writeSse(response, 'tool_call_start', { toolCallId, name, argsPreview: preview, startedAt });
+            const visibleTool = name !== 'web_search';
+            if (visibleTool) {
+              upsertToolCard({
+                toolCallId,
+                name,
+                toolName: name,
+                status: 'running',
+                startedAt,
+                argsPreview: preview
+              });
+              await writeSse(response, 'tool_call_start', { toolCallId, name, argsPreview: preview, startedAt });
+            }
             const result = await executeTool(name, parsedArgs, toolRuntime, { signal: entry.abortController.signal });
             if (result.clientAction) {
               rememberClientToolAction(toolCallId, name, result.clientAction);
               await writeSse(response, 'client_tool_action', { toolCallId, name, action: result.clientAction });
             }
             const display = buildToolDisplay(result, { maxChars: config.toolMaxResultChars });
-            upsertToolCard({
-              toolCallId,
-              name,
-              toolName: name,
-              status: 'complete',
-              startedAt,
-              completedAt: Date.now(),
-              elapsedMs: Date.now() - startedAt,
-              cacheHit: Boolean(result.cacheHit),
-              source: result.source || 'local',
-              display
-            });
-            await writeSse(response, 'tool_call_result', {
-              toolCallId,
-              name,
-              elapsedMs: Date.now() - startedAt,
-              cacheHit: Boolean(result.cacheHit),
-              source: result.source || 'local',
-              display
-            });
+            if (visibleTool) {
+              upsertToolCard({
+                toolCallId,
+                name,
+                toolName: name,
+                status: 'complete',
+                startedAt,
+                completedAt: Date.now(),
+                elapsedMs: Date.now() - startedAt,
+                cacheHit: Boolean(result.cacheHit),
+                source: result.source || 'local',
+                display
+              });
+              await writeSse(response, 'tool_call_result', {
+                toolCallId,
+                name,
+                elapsedMs: Date.now() - startedAt,
+                cacheHit: Boolean(result.cacheHit),
+                source: result.source || 'local',
+                display
+              });
+            }
             toolResults.push(result);
             executedMessages.push({
               role: 'tool',
@@ -633,24 +788,26 @@ async function streamAssistantReply({
               title: name,
               summary: message
             };
-            upsertToolCard({
-              toolCallId,
-              name,
-              toolName: name,
-              status: 'error',
-              startedAt,
-              completedAt: Date.now(),
-              elapsedMs: Date.now() - startedAt,
-              error: message,
-              display
-            });
-            await writeSse(response, 'tool_call_error', {
-              toolCallId,
-              name,
-              message,
-              elapsedMs: Date.now() - startedAt,
-              display
-            });
+            if (name !== 'web_search') {
+              upsertToolCard({
+                toolCallId,
+                name,
+                toolName: name,
+                status: 'error',
+                startedAt,
+                completedAt: Date.now(),
+                elapsedMs: Date.now() - startedAt,
+                error: message,
+                display
+              });
+              await writeSse(response, 'tool_call_error', {
+                toolCallId,
+                name,
+                message,
+                elapsedMs: Date.now() - startedAt,
+                display
+              });
+            }
             executedMessages.push({
               role: 'tool',
               content: `Tool ${name} failed: ${message}`
@@ -699,13 +856,25 @@ async function streamAssistantReply({
 
     let doneReason = 'stop';
     modelStartedAt = Date.now();
+    const serializeStartedAt = Date.now();
+    const modelMessages = compactLeadingSystemMessages(workingMessages);
+    messageSerializeMs = Math.max(0, Date.now() - serializeStartedAt);
     for await (const chunk of ollama.streamChat({
       model,
-      messages: compactLeadingSystemMessages(workingMessages),
+      messages: modelMessages,
       options,
+      cache: promptCacheOptions({
+        chat,
+        model,
+        messages: modelMessages,
+        enabled: backend.id === 'mlx',
+        branchId: 'main'
+      }),
       signal: entry.abortController.signal
     })) {
-      if (chunk.type === 'token') {
+      if (chunk.type === 'meta') {
+        modelMeta = chunk;
+      } else if (chunk.type === 'token') {
         firstTokenAt = firstTokenAt || Date.now();
         tokenCount += 1;
         content += chunk.delta;
@@ -726,6 +895,9 @@ async function streamAssistantReply({
         searchContext,
         toolActions: clientToolActions,
         toolCards,
+        modelMeta,
+        contextFetchMs,
+        messageSerializeMs,
         doneReason
       })
     });
@@ -748,6 +920,9 @@ async function streamAssistantReply({
           searchContext,
           toolActions: clientToolActions,
           toolCards,
+          modelMeta,
+          contextFetchMs,
+          messageSerializeMs,
           doneReason: reason
         })
       });
@@ -770,6 +945,9 @@ async function streamAssistantReply({
           searchContext,
           toolActions: clientToolActions,
           toolCards,
+          modelMeta,
+          contextFetchMs,
+          messageSerializeMs,
           doneReason: 'error'
         })
       });
@@ -816,7 +994,7 @@ function createGeneration({ db, generationManager, chat, model }) {
   }
 }
 
-export function registerRoutes(app, { config, db, ollama, generationManager, searchClient = null }) {
+export function registerRoutes(app, { config, db, ollama, generationManager, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
   const toolRuntime = createToolRuntime(config, ollama, searchClient);
 
   app.get('/health', async () => {
@@ -986,7 +1164,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     }
 
     try {
-      return await ollama.unloadLoadedModels();
+      return await ollama.unloadLoadedModels({ includePinnedMlx: true, reason: 'user_requested' });
     } catch (error) {
       if (error instanceof OllamaUnavailableError) {
         return sendError(
@@ -1000,12 +1178,63 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     }
   });
 
+  app.post('/api/presearch/analyze', async (request, reply) => {
+    if (!preSearchManager) {
+      return {
+        used: false,
+        skipped: 'unavailable'
+      };
+    }
+    const body = request.body || {};
+    const chat = assertChat(db, request.body?.chatId);
+    try {
+      return await preSearchManager.analyze({
+        chatId: chat.id,
+        draft: requireString(body.draft, ''),
+        enabled: body.enabled !== false,
+        webSearch: body.webSearch !== false,
+        hasAttachments: Boolean(body.hasAttachments),
+        signal: request.raw?.signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      return {
+        used: false,
+        skipped: 'error',
+        message: error instanceof Error ? error.message : 'Pre-search failed.'
+      };
+    }
+  });
+
+  app.post('/api/sources/summarize', async (request) => {
+    const sources = Array.isArray(request.body?.sources) ? request.body.sources : [];
+    let enrichedSources = sources.slice(0, 10);
+    if (searchClient && typeof searchClient.fetchPagesForResults === 'function') {
+      enrichedSources = await searchClient.fetchPagesForResults(enrichedSources, {
+        limit: Math.min(5, enrichedSources.length),
+        signal: request.raw?.signal
+      });
+    }
+    if (!sourceSummaryCache) {
+      return {
+        sources: enrichedSources.map((source) => ({
+          title: source.title || source.url || 'Untitled source',
+          url: source.url || '',
+          domain: domainForUrl(source.url),
+          faviconUrl: faviconForUrl(source.url),
+          summary: source.summary || source.snippet || source.content || ''
+        }))
+      };
+    }
+    return sourceSummaryCache.summarize(enrichedSources);
+  });
+
   app.post('/api/chats', async (request, reply) => {
     const body = request.body || {};
     const chat = db.createChat({
       title: requireString(body.title, 'New chat'),
       model: requireString(body.model),
-      systemPrompt: requireString(body.systemPrompt)
+      systemPrompt: requireString(body.systemPrompt, config.defaultSystemPrompt)
     });
     return reply.code(201).send({ chat });
   });
@@ -1065,7 +1294,9 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
       });
 
       const latestChat = db.getChat(chat.id);
+      const contextFetchStartedAt = Date.now();
       const messages = db.getVisibleContext(latestChat);
+      const contextFetchMs = Math.max(0, Date.now() - contextFetchStartedAt);
 
       await streamAssistantReply({
         request,
@@ -1077,13 +1308,18 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
         chat: latestChat,
         model,
         messages,
+        contextFetchMs,
         options: optionsFromBody(body),
         webSearch: webSearchFromBody(body),
+        preSearchId: requireString(body.preSearchId),
+        searchMode: body.searchMode === 'extra' ? 'extra' : 'normal',
+        searchStrategy: searchStrategyFromBody(body),
         tools: body.tools,
         assistantMessage,
         entry,
         toolRuntime,
-        searchClient
+        searchClient,
+        preSearchManager
       });
     } catch (error) {
       if (!attachmentsPersisted) cleanupSavedAttachments(attachments);
@@ -1091,11 +1327,99 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     }
   });
 
+  app.post('/api/chats/:chatId/messages/:messageId/edit', async (request, reply) => {
+    const body = request.body || {};
+    const content = requireString(body.content, '');
+    if (!content) {
+      throw badRequest('empty_message', 'Message content is required.');
+    }
+
+    const chat = assertChat(db, request.params.chatId);
+    const visibleMessages = db.getMessages(chat.id);
+    const targetIndex = visibleMessages.findIndex((message) => message.id === request.params.messageId);
+    const targetMessage = targetIndex >= 0 ? visibleMessages[targetIndex] : null;
+    if (!targetMessage || targetMessage.role !== 'user') {
+      throw badRequest('message_not_editable', 'Only visible user messages can be edited.');
+    }
+
+    const model = resolveModel({ body, chat, config });
+    if (!model) {
+      throw badRequest('missing_model', 'Provide a model, set a chat model, or configure NAOW_DEFAULT_MODEL.');
+    }
+
+    let entry;
+    try {
+      entry = generationManager.start({
+        chatId: chat.id,
+        assistantMessageId: 'pending'
+      });
+    } catch (error) {
+      if (error instanceof GenerationInProgressError) {
+        throw conflict('generation_in_progress', 'This chat already has an active generation.');
+      }
+      throw error;
+    }
+
+    let assistantMessage;
+    let latestChat;
+    let messages;
+    let contextFetchMs = null;
+    try {
+      for (const message of visibleMessages.slice(targetIndex)) {
+        db.markMessageReplaced(message.id);
+      }
+      db.createUserMessage(chat.id, content);
+      assistantMessage = db.createAssistantMessage(chat.id, entry.generationId);
+      entry.assistantMessageId = assistantMessage.id;
+      db.setChatModelIfEmpty(chat.id, model);
+      latestChat = db.getChat(chat.id);
+      const contextFetchStartedAt = Date.now();
+      messages = db.getVisibleContext(latestChat);
+      contextFetchMs = Math.max(0, Date.now() - contextFetchStartedAt);
+    } catch (error) {
+      generationManager.finish(entry.generationId);
+      throw error;
+    }
+
+    await streamAssistantReply({
+      request,
+      reply,
+      config,
+      db,
+      ollama,
+      generationManager,
+      chat: latestChat,
+      model,
+      messages,
+      contextFetchMs,
+      options: optionsFromBody(body),
+      webSearch: webSearchFromBody(body),
+      searchStrategy: searchStrategyFromBody(body),
+      tools: body.tools,
+      assistantMessage,
+      entry,
+      toolRuntime,
+      searchClient,
+      preSearchManager
+    });
+  });
+
   app.post('/api/chats/:chatId/regenerate', async (request, reply) => {
     const body = request.body || {};
     const chat = assertChat(db, request.params.chatId);
-    const latestAssistant = db.getLatestVisibleAssistant(chat.id);
+    const visibleMessages = db.getMessages(chat.id);
+    const requestedMessageId = requireString(body.messageId || body.assistantMessageId);
+    let latestAssistant = requestedMessageId
+      ? visibleMessages.find((message) => message.id === requestedMessageId)
+      : db.getLatestVisibleAssistant(chat.id);
+    if (latestAssistant?.role === 'user') {
+      const userIndex = visibleMessages.findIndex((message) => message.id === latestAssistant.id);
+      latestAssistant = visibleMessages.slice(userIndex + 1).find((message) => message.role === 'assistant') || null;
+    }
     if (!latestAssistant) {
+      throw badRequest('nothing_to_regenerate', 'No assistant reply exists to regenerate.');
+    }
+    if (latestAssistant.role !== 'assistant') {
       throw badRequest('nothing_to_regenerate', 'No assistant reply exists to regenerate.');
     }
 
@@ -1120,9 +1444,19 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     let messages;
     let assistantMessage;
     let latestChat;
+    let contextFetchMs = null;
+    const selectedIndex = visibleMessages.findIndex((message) => message.id === latestAssistant.id);
     try {
+      const contextFetchStartedAt = Date.now();
       messages = db.getVisibleContext(chat, latestAssistant);
-      db.markMessageReplaced(latestAssistant.id);
+      contextFetchMs = Math.max(0, Date.now() - contextFetchStartedAt);
+      if (selectedIndex >= 0 && selectedIndex < visibleMessages.length - 1) {
+        for (const message of visibleMessages.slice(selectedIndex)) {
+          db.markMessageReplaced(message.id);
+        }
+      } else {
+        db.markMessageReplaced(latestAssistant.id);
+      }
       assistantMessage = db.createAssistantMessage(chat.id, entry.generationId);
       entry.assistantMessageId = assistantMessage.id;
       db.setChatModelIfEmpty(chat.id, model);
@@ -1142,13 +1476,19 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
       chat: latestChat,
       model,
       messages,
+      contextFetchMs,
       options: optionsFromBody(body),
       webSearch: webSearchFromBody(body),
+      preSearchId: requireString(body.preSearchId),
+      searchMode: body.searchMode === 'extra' ? 'extra' : 'normal',
+      searchStrategy: searchStrategyFromBody(body),
+      extraSources: latestAssistant.metrics?.sources || [],
       tools: body.tools,
       assistantMessage,
       entry,
       toolRuntime,
-      searchClient
+      searchClient,
+      preSearchManager
     });
   });
 
