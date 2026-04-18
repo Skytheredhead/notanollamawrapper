@@ -3,7 +3,7 @@
 Optimized for speed and doesn't rely on Ollama or any other app behind the scenes.
 
 ## features
-- Automatic model downlaods (courtesy of my other project, Stemsplat)
+- Automatic model downloads (courtesy of my other project, Stemsplat)
 - Cool UI
 - Nerd numbers for nerds
 - Local web search with a native Python SearXNG sidecar, no relying on Docker or Ollama
