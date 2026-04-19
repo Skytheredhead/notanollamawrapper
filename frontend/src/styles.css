@@ -1336,10 +1336,62 @@ button, input, textarea, select { font: inherit; }
   white-space: nowrap;
 }
 
+.weatherChatgptChartPlot {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.weatherChatgptYAxis {
+  position: relative;
+  flex: 0 0 36px;
+  min-height: 120px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+.weatherChatgptYTick {
+  position: absolute;
+  right: 0;
+  line-height: 1;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
 .weatherChatgptSvg {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 120px;
   display: block;
+}
+
+.weatherChatgptBand {
+  fill: color-mix(in srgb, var(--line) 28%, transparent);
+}
+
+.weatherChatgptBand--alt {
+  fill: color-mix(in srgb, var(--line) 48%, transparent);
+}
+
+.color-dark .weatherChatgptBand {
+  fill: color-mix(in srgb, #ffffff 6%, transparent);
+}
+
+.color-dark .weatherChatgptBand--alt {
+  fill: color-mix(in srgb, #ffffff 11%, transparent);
+}
+
+.weatherChatgptYGrid {
+  stroke: color-mix(in srgb, var(--line) 55%, transparent);
+  stroke-width: 0.35;
+  vector-effect: non-scaling-stroke;
+}
+
+.color-dark .weatherChatgptYGrid {
+  stroke: color-mix(in srgb, #ffffff 12%, transparent);
 }
 
 .weatherChatgptLine {
@@ -1368,6 +1420,275 @@ button, input, textarea, select { font: inherit; }
   color: var(--muted);
   border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
   padding-top: 12px;
+}
+
+.naowToolWrap {
+  padding: 0;
+  overflow: hidden;
+}
+
+.naowWidget {
+  border-radius: calc(var(--radius) + 4px);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+  padding: 14px 16px;
+}
+
+.naowWidgetHead {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.naowWidget--graph {
+  padding-bottom: 12px;
+}
+
+.naowMathGraphCanvas {
+  display: block;
+  width: 100%;
+  height: 280px;
+  border-radius: 10px;
+  vertical-align: middle;
+}
+
+.naowMathGraphLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 12px;
+}
+
+.naowMathLegItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.naowMathLegSwatch {
+  width: 12px;
+  height: 3px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.naowConversionRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  font-family: var(--mono);
+  font-size: 22px;
+  color: var(--ink);
+}
+
+.naowConversionBig,
+.naowCurrencyAmt {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.naowConversionU {
+  font-size: 14px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.naowConversionArrow {
+  color: var(--muted);
+  font-size: 18px;
+}
+
+.naowWidgetMeta {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.naowClockGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.naowClockCell {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+.naowClockPlace {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.naowClockTime {
+  font-size: 20px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.naowClockSub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.naowClockTz {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-family: var(--mono);
+}
+
+.naowScoresList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.naowScoreRow {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+
+.naowScoreStatus {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.naowScoreTeams {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.naowScoreTeam {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.naowStandingsList {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.naowStandingsList li {
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.naowStandSum {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.naowPlayerGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.naowPlayerCard {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.naowPlayerPhoto {
+  width: 100%;
+  max-height: 120px;
+  object-fit: contain;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.naowPlayerName {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.naowPlayerMeta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.naowTeamCard {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.naowTeamLogo {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+}
+
+.naowTeamName {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.naowTeamMeta {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.naowWidgetErr {
+  color: #b42318;
+  margin: 0;
+  font-size: 13px;
+}
+
+.searchImageGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 10px 0 4px;
+}
+
+.searchImageCell {
+  margin: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
+}
+
+.searchImageCell img {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  display: block;
+}
+
+.searchImageCell figcaption {
+  font-size: 10px;
+  color: var(--muted);
+  padding: 6px 8px;
+  line-height: 1.25;
+  max-height: 3.8em;
+  overflow: hidden;
 }
 
 .toolCardHeader {

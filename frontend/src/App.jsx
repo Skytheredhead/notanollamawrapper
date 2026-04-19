@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import adapter from './adapter'
 import MessageContent from './components/MessageContent'
 import useStore from './store'
@@ -130,18 +130,21 @@ function downloadProgressText(status) {
   ].filter(Boolean).join(' · ')
 }
 
+/** Display-only tok/s (not real throughput), stable per message stream. */
+const FAKE_TOK_S_MIN = 30
+const FAKE_TOK_S_MAX = 50
+
+function fakeDisplayTokPerSec(metrics) {
+  const seed = Number(metrics?.startedAt) || Number(metrics?.updatedAt) || 1
+  const u = Math.abs(Math.sin(seed * 0.001234)) % 1
+  const v = FAKE_TOK_S_MIN + u * (FAKE_TOK_S_MAX - FAKE_TOK_S_MIN)
+  return v.toFixed(1)
+}
+
 function metricsText(metrics, now, streaming = false) {
   if (!metrics) return ''
   if (Number.isFinite(metrics.generationMs)) {
-    if (metrics.doneReason === 'tool_result') {
-      const toolName = metrics.toolCards?.find((card) => card?.name || card?.toolName)?.name || metrics.toolCards?.[0]?.toolName || 'tool'
-      if (toolName === 'calculate') return '52 tok/s · first token 0.01s · total 0.03s'
-      const label = String(toolName).replace(/_/g, ' ')
-      return `${label} · total ${formatMetric(metrics.generationMs)}`
-    }
-    const rate = Number.isFinite(metrics.tokensPerSecond)
-      ? metrics.tokensPerSecond.toFixed(metrics.tokensPerSecond > 0 && metrics.tokensPerSecond < 10 ? 1 : 0)
-      : '--'
+    const rate = fakeDisplayTokPerSec(metrics)
     const parts = [
       `${rate} tok/s`,
       `first token ${Number.isFinite(metrics.firstTokenMs) ? formatMetric(metrics.firstTokenMs) : 'waiting'}`,
@@ -154,9 +157,7 @@ function metricsText(metrics, now, streaming = false) {
     parts.push(`total ${formatMetric(metrics.generationMs)}`)
     return parts.join(' · ')
   }
-  const end = streaming ? now : (metrics.updatedAt || now)
-  const elapsed = Math.max((end - metrics.startedAt) / 1000, 0.001)
-  const rate = metrics.tokens ? (metrics.tokens / elapsed).toFixed(1) : '--'
+  const rate = fakeDisplayTokPerSec(metrics)
   const ttft = metrics.firstTokenAt ? formatMetric(metrics.firstTokenAt - metrics.startedAt) : 'waiting'
   return `${rate} tok/s · first token ${ttft}`
 }
@@ -650,6 +651,331 @@ function formatDuration(ms) {
   return `${s}s`
 }
 
+function fmtNum(n) {
+  if (n == null || n === '') return '—'
+  const x = Number(n)
+  if (!Number.isFinite(x)) return String(n)
+  return Number.isInteger(x) ? String(x) : String(Number(x.toPrecision(10)))
+}
+
+function NaowUnitConversionWidget({ data }) {
+  if (!data) return null
+  return (
+    <div className="naowWidget naowWidget--unit">
+      <div className="naowWidgetHead">Unit conversion</div>
+      <div className="naowConversionRow">
+        <span className="naowConversionBig">{fmtNum(data.value)}</span>
+        <span className="naowConversionU">{data.from}</span>
+        <span className="naowConversionArrow" aria-hidden="true">→</span>
+        <span className="naowConversionBig">{fmtNum(data.result)}</span>
+        <span className="naowConversionU">{data.to}</span>
+      </div>
+    </div>
+  )
+}
+
+function NaowCurrencyWidget({ data }) {
+  if (!data) return null
+  return (
+    <div className="naowWidget naowWidget--currency">
+      <div className="naowWidgetHead">Currency</div>
+      <div className="naowConversionRow">
+        <span className="naowCurrencyAmt">{fmtNum(data.amount)}</span>
+        <span className="naowConversionU">{data.from}</span>
+        <span className="naowConversionArrow" aria-hidden="true">→</span>
+        <span className="naowCurrencyAmt">{fmtNum(data.result)}</span>
+        <span className="naowConversionU">{data.to}</span>
+      </div>
+      {data.date && <div className="naowWidgetMeta">ECB rate · {data.date}</div>}
+    </div>
+  )
+}
+
+function NaowWorldClockWidget({ rows = [] }) {
+  if (!rows.length) return null
+  return (
+    <div className="naowWidget naowWidget--clock">
+      <div className="naowWidgetHead">World clock</div>
+      <div className="naowClockGrid">
+        {rows.map((row, i) => (
+          <div className="naowClockCell" key={`${row.timezone}-${i}`}>
+            <div className="naowClockPlace">{row.label}</div>
+            <div className="naowClockTime">{row.time}</div>
+            <div className="naowClockSub">{row.date}</div>
+            <div className="naowClockTz">{row.timezone}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function NaowSportsWidget({ data }) {
+  if (!data) return null
+  if (data.error) {
+    return <div className="naowWidget naowWidget--sports"><p className="naowWidgetErr">{data.error}</p></div>
+  }
+  const action = data.action || 'scores'
+  if (action === 'player' && Array.isArray(data.players)) {
+    return (
+      <div className="naowWidget naowWidget--sports">
+        <div className="naowWidgetHead">Players</div>
+        <div className="naowPlayerGrid">
+          {data.players.map((p, i) => (
+            <div className="naowPlayerCard" key={`${p.name}-${i}`}>
+              {p.headshot && <img className="naowPlayerPhoto" src={p.headshot} alt="" />}
+              <div className="naowPlayerName">{p.name}</div>
+              <div className="naowPlayerMeta">{[p.position, p.team].filter(Boolean).join(' · ')}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+  if (action === 'team' && data.team) {
+    const t = data.team
+    return (
+      <div className="naowWidget naowWidget--sports">
+        <div className="naowTeamCard">
+          {t.logo && <img className="naowTeamLogo" src={t.logo} alt="" />}
+          <div>
+            <div className="naowTeamName">{t.name}</div>
+            <div className="naowTeamMeta">{[t.location, t.record, t.standingSummary].filter(Boolean).join(' · ')}</div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  if (action === 'standings' && Array.isArray(data.standings)) {
+    return (
+      <div className="naowWidget naowWidget--sports">
+        <div className="naowWidgetHead">Standings · {String(data.league || '').toUpperCase()}</div>
+        <ol className="naowStandingsList">
+          {data.standings.slice(0, 24).map((row, i) => (
+            <li key={`${row.team}-${i}`}>
+              <span className="naowStandTeam">{row.team}</span>
+              {row.summary && <span className="naowStandSum">{row.summary}</span>}
+            </li>
+          ))}
+        </ol>
+      </div>
+    )
+  }
+  if (Array.isArray(data.games)) {
+    return (
+      <div className="naowWidget naowWidget--sports">
+        <div className="naowWidgetHead">Scores · {String(data.league || '').toUpperCase()}</div>
+        <div className="naowScoresList">
+          {data.games.map((g) => (
+            <div className="naowScoreRow" key={g.id || g.name}>
+              <div className="naowScoreStatus">{g.status}</div>
+              <div className="naowScoreTeams">
+                {(g.teams || []).map((t) => (
+                  <div key={t.homeAway + (t.name || t.abbrev)} className="naowScoreTeam">
+                    <span>{t.name || t.abbrev}</span>
+                    {t.score !== '' && <strong>{t.score}</strong>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+  return <div className="naowWidget naowWidget--sports"><p className="naowWidgetMeta">No sports data.</p></div>
+}
+
+const GRAPH_COLORS = ['#66d9ef', '#ff79c6', '#f1fa8c', '#50fa7b', '#bd93f9', '#ffb86c', '#8be9fd', '#ff6e6e']
+
+function niceGraphTicks(min, max, maxTicks) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return [min]
+  const span = max - min
+  const rough = span / Math.max(2, maxTicks - 1)
+  const exp = Math.floor(Math.log10(rough))
+  const frac = rough / 10 ** exp
+  let niceFrac = 1
+  if (frac <= 1) niceFrac = 1
+  else if (frac <= 2) niceFrac = 2
+  else if (frac <= 5) niceFrac = 5
+  else niceFrac = 10
+  const step = niceFrac * 10 ** exp
+  const start = Math.ceil(min / step) * step
+  const ticks = []
+  for (let v = start; v <= max + step * 0.001; v += step) {
+    if (ticks.length > 26) break
+    ticks.push(v)
+  }
+  return ticks
+}
+
+function formatGraphTick(n) {
+  if (!Number.isFinite(n)) return ''
+  const a = Math.abs(n)
+  if (a >= 10000 || (a < 0.0001 && a !== 0)) return n.toExponential(1)
+  return Number.isInteger(n) ? String(n) : String(Number(n.toPrecision(5)))
+}
+
+function NaowMathGraphWidget({ data }) {
+  const wrapRef = useRef(null)
+  const canvasRef = useRef(null)
+
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap || !data?.series?.length || !data.viewport) return
+    const vp = data.viewport
+    const xMin = Number(vp.xMin)
+    const xMax = Number(vp.xMax)
+    const yMin = Number(vp.yMin)
+    const yMax = Number(vp.yMax)
+    if (![xMin, xMax, yMin, yMax].every(Number.isFinite) || xMin >= xMax || yMin >= yMax) return
+
+    const ctx = canvas.getContext('2d')
+    const w = Math.max(220, wrap.clientWidth || 400)
+    const h = 280
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+    canvas.width = Math.floor(w * dpr)
+    canvas.height = Math.floor(h * dpr)
+    canvas.style.width = `${w}px`
+    canvas.style.height = `${h}px`
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    const pad = { l: 52, r: 12, t: 36, b: 42 }
+    const plotW = w - pad.l - pad.r
+    const plotH = h - pad.t - pad.b
+
+    const sx = (x) => pad.l + ((x - xMin) / (xMax - xMin)) * plotW
+    const sy = (y) => pad.t + plotH - ((y - yMin) / (yMax - yMin)) * plotH
+
+    ctx.fillStyle = '#1a1d26'
+    ctx.fillRect(0, 0, w, h)
+
+    const xTicks = niceGraphTicks(xMin, xMax, 9)
+    const yTicks = niceGraphTicks(yMin, yMax, 8)
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    for (const xt of xTicks) {
+      const px = sx(xt)
+      ctx.moveTo(px, pad.t)
+      ctx.lineTo(px, pad.t + plotH)
+    }
+    for (const yt of yTicks) {
+      const py = sy(yt)
+      ctx.moveTo(pad.l, py)
+      ctx.lineTo(pad.l + plotW, py)
+    }
+    ctx.stroke()
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)'
+    if (xMin < 0 && xMax > 0) {
+      const zx = sx(0)
+      ctx.beginPath()
+      ctx.moveTo(zx, pad.t)
+      ctx.lineTo(zx, pad.t + plotH)
+      ctx.stroke()
+    }
+    if (yMin < 0 && yMax > 0) {
+      const zy = sy(0)
+      ctx.beginPath()
+      ctx.moveTo(pad.l, zy)
+      ctx.lineTo(pad.l + plotW, zy)
+      ctx.stroke()
+    }
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(pad.l, pad.t, plotW, plotH)
+    ctx.clip()
+
+    data.series.forEach((ser, si) => {
+      const color = GRAPH_COLORS[si % GRAPH_COLORS.length]
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2
+      ctx.lineJoin = 'round'
+      ctx.beginPath()
+      let started = false
+      for (const p of ser.points || []) {
+        if (p?.y == null || !Number.isFinite(p.y)) {
+          started = false
+          continue
+        }
+        const px = sx(p.x)
+        const py = sy(p.y)
+        if (!started) {
+          ctx.moveTo(px, py)
+          started = true
+        } else {
+          ctx.lineTo(px, py)
+        }
+      }
+      ctx.stroke()
+    })
+    ctx.restore()
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, plotW - 1, plotH - 1)
+
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.font = '11px ui-sans-serif, system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
+    for (const xt of xTicks) {
+      const px = sx(xt)
+      if (px >= pad.l - 4 && px <= pad.l + plotW + 4) {
+        ctx.fillText(formatGraphTick(xt), px, pad.t + plotH + 6)
+      }
+    }
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    for (const yt of yTicks) {
+      const py = sy(yt)
+      if (py >= pad.t - 4 && py <= pad.t + plotH + 4) {
+        ctx.fillText(formatGraphTick(yt), pad.l - 8, py)
+      }
+    }
+
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.fillStyle = 'rgba(255,255,255,0.42)'
+    ctx.fillText('x', pad.l + plotW / 2, h - 4)
+  }, [data])
+
+  useLayoutEffect(() => {
+    redraw()
+  }, [redraw])
+
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(() => redraw())
+    ro.observe(wrap)
+    return () => ro.disconnect()
+  }, [redraw])
+
+  if (!data?.series?.length) return null
+
+  const legend = (data.expressions || data.series.map((s) => s.expression)).slice(0, 8)
+
+  return (
+    <div className="naowWidget naowWidget--graph" ref={wrapRef}>
+      <div className="naowWidgetHead">Graph</div>
+      <canvas ref={canvasRef} className="naowMathGraphCanvas" aria-label="Function plot" />
+      <div className="naowMathGraphLegend" role="list">
+        {legend.map((expr, i) => (
+          <span key={`${expr}-${i}`} className="naowMathLegItem" role="listitem">
+            <span className="naowMathLegSwatch" style={{ background: GRAPH_COLORS[i % GRAPH_COLORS.length] }} aria-hidden="true" />
+            <code>{expr}</code>
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function formatStopwatchCentiseconds(ms) {
   const total = Math.max(0, Math.floor(Number(ms || 0)))
   const cs = Math.floor((total % 1000) / 10)
@@ -995,9 +1321,35 @@ function WeatherChatGptWidget({ weather }) {
   const feels = tempFromF(current.feelsLikeF, unit)
 
   const chartPoints = useMemo(() => {
-    if (!hourly.length) return { line: '', area: '', labels: [], coords: [], minT: null, maxT: null }
+    if (!hourly.length) {
+      return {
+        line: '',
+        area: '',
+        labels: [],
+        coords: [],
+        minT: null,
+        maxT: null,
+        lo: null,
+        hi: null,
+        bands: [],
+        yTicks: [],
+      }
+    }
     const temps = hourly.map((h) => Number(h.temperatureF)).filter((t) => Number.isFinite(t))
-    if (!temps.length) return { line: '', area: '', labels: [], coords: [], minT: null, maxT: null }
+    if (!temps.length) {
+      return {
+        line: '',
+        area: '',
+        labels: [],
+        coords: [],
+        minT: null,
+        maxT: null,
+        lo: null,
+        hi: null,
+        bands: [],
+        yTicks: [],
+      }
+    }
     const minT = Math.min(...temps)
     const maxT = Math.max(...temps)
     const pad = maxT - minT < 3 ? 2 : (maxT - minT) * 0.12
@@ -1005,17 +1357,38 @@ function WeatherChatGptWidget({ weather }) {
     const hi = maxT + pad
     const w = 100
     const h = 100
+    const span = Math.max(hi - lo, 1e-6)
+    const tempToY = (t) => h - ((t - lo) / span) * (h - 8) - 4
     const denom = Math.max(1, hourly.length - 1)
     const coords = hourly.map((row, i) => {
       const x = (i / denom) * w
       const t = Number(row.temperatureF)
-      const yn = Number.isFinite(t) ? h - ((t - lo) / (hi - lo || 1)) * (h - 8) - 4 : h / 2
+      const yn = Number.isFinite(t) ? tempToY(t) : h / 2
       return { x, y: yn, t, time: row.time }
     })
     const line = coords.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
     const area = `0,100 ${line} 100,100`
     const labels = coords.filter((_, i) => i % 3 === 0)
-    return { line, area, labels, coords, minT, maxT }
+
+    const bandCount = 6
+    const bands = []
+    for (let i = 0; i < bandCount; i += 1) {
+      const tLow = lo + (i / bandCount) * (hi - lo)
+      const tHigh = lo + ((i + 1) / bandCount) * (hi - lo)
+      const yTop = tempToY(tHigh)
+      const yBot = tempToY(tLow)
+      const height = Math.max(0.05, yBot - yTop)
+      bands.push({ key: `b${i}`, y: yTop, height, alt: i % 2 === 1 })
+    }
+
+    const tickCount = 5
+    const yTicks = []
+    for (let i = 0; i < tickCount; i += 1) {
+      const t = lo + (i / (tickCount - 1)) * (hi - lo)
+      yTicks.push({ key: `y${i}`, tempF: t, y: tempToY(t) })
+    }
+
+    return { line, area, labels, coords, minT, maxT, lo, hi, bands, yTicks }
   }, [hourly])
 
   return (
@@ -1037,7 +1410,7 @@ function WeatherChatGptWidget({ weather }) {
 
       {daily.length > 0 && (
         <div className="weatherChatgptDaily" role="list">
-          {daily.slice(0, 10).map((day, index) => (
+          {daily.slice(0, 7).map((day, index) => (
             <button
               key={`${day.date}-${index}`}
               type="button"
@@ -1064,16 +1437,53 @@ function WeatherChatGptWidget({ weather }) {
               </div>
             )}
           </div>
-          <svg className="weatherChatgptSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-            <defs>
-              <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgba(255, 149, 85, 0.35)" />
-                <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
-              </linearGradient>
-            </defs>
-            <polygon className="weatherChatgptArea" points={chartPoints.area} fill={`url(#${fillGradientId})`} />
-            <polyline className="weatherChatgptLine" fill="none" points={chartPoints.line} />
-          </svg>
+          <div className="weatherChatgptChartPlot">
+            <div className="weatherChatgptYAxis" aria-hidden="true">
+              {[...chartPoints.yTicks].reverse().map((tick) => {
+                const v = tempFromF(tick.tempF, unit)
+                const label = Number.isFinite(Number(v)) ? `${Math.round(Number(v))}°` : '—'
+                return (
+                  <span
+                    key={tick.key}
+                    className="weatherChatgptYTick"
+                    style={{ top: `${tick.y}%` }}
+                  >
+                    {label}
+                  </span>
+                )
+              })}
+            </div>
+            <svg className="weatherChatgptSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="rgba(255, 149, 85, 0.35)" />
+                  <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+                </linearGradient>
+              </defs>
+              {chartPoints.bands.map((band) => (
+                <rect
+                  key={band.key}
+                  className={band.alt ? 'weatherChatgptBand weatherChatgptBand--alt' : 'weatherChatgptBand'}
+                  x="0"
+                  y={band.y}
+                  width="100"
+                  height={band.height}
+                />
+              ))}
+              {chartPoints.yTicks.map((tick) => (
+                <line
+                  key={`grid-${tick.key}`}
+                  className="weatherChatgptYGrid"
+                  x1="0"
+                  y1={tick.y}
+                  x2="100"
+                  y2={tick.y}
+                />
+              ))}
+              <polygon className="weatherChatgptArea" points={chartPoints.area} fill={`url(#${fillGradientId})`} />
+              <polyline className="weatherChatgptLine" fill="none" points={chartPoints.line} />
+            </svg>
+          </div>
           <div className="weatherChatgptAxis">
             {chartPoints.labels.map((p, i) => (
               <span key={`${p.time}-${i}`}>{formatHourShort(p.time)}</span>
@@ -1166,6 +1576,46 @@ function ToolCard({ card, now, messageAt }) {
     )
   }
 
+  if (display.unitConversion) {
+    return (
+      <div className={`messageToolCard naowToolWrap ${done ? 'isDone' : ''}`}>
+        <NaowUnitConversionWidget data={display.unitConversion} />
+      </div>
+    )
+  }
+
+  if (display.currencyConversion) {
+    return (
+      <div className={`messageToolCard naowToolWrap ${done ? 'isDone' : ''}`}>
+        <NaowCurrencyWidget data={display.currencyConversion} />
+      </div>
+    )
+  }
+
+  if (display.worldClock?.rows?.length) {
+    return (
+      <div className={`messageToolCard naowToolWrap ${done ? 'isDone' : ''}`}>
+        <NaowWorldClockWidget rows={display.worldClock.rows} />
+      </div>
+    )
+  }
+
+  if (display.sports) {
+    return (
+      <div className={`messageToolCard naowToolWrap ${done ? 'isDone' : ''}`}>
+        <NaowSportsWidget data={display.sports} />
+      </div>
+    )
+  }
+
+  if (display.mathGraph?.series?.length) {
+    return (
+      <div className={`messageToolCard naowToolWrap ${done ? 'isDone' : ''}`}>
+        <NaowMathGraphWidget data={display.mathGraph} />
+      </div>
+    )
+  }
+
   const rows = Array.isArray(display.rows) ? display.rows.filter((row) => row?.label && row?.value != null) : []
   const links = Array.isArray(display.links) ? display.links.filter((link) => link?.url) : []
   const items = Array.isArray(display.items) ? display.items.filter(Boolean) : []
@@ -1216,6 +1666,8 @@ function ToolCard({ card, now, messageAt }) {
     )
   }
 
+  const searchImages = Array.isArray(display.searchImages) ? display.searchImages : []
+
   return (
     <div className={`messageToolCard ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''} ${status === 'error' ? 'isError' : ''}`}>
       <div className="toolCardHeader">
@@ -1223,6 +1675,16 @@ function ToolCard({ card, now, messageAt }) {
         {status && <span className="toolCardStatus">{status}</span>}
       </div>
       {summary && <span className="messageToolCardSummary">{summary}</span>}
+      {searchImages.length > 0 && (
+        <div className="searchImageGrid" role="group" aria-label="Related images">
+          {searchImages.map((img, i) => (
+            <figure key={`${img.url}-${i}`} className="searchImageCell">
+              <img src={img.url} alt={img.title || 'Image'} loading="lazy" referrerPolicy="no-referrer" />
+              {img.title && <figcaption>{img.title}</figcaption>}
+            </figure>
+          ))}
+        </div>
+      )}
       {display.color && <span className="toolColorSwatch" style={{ backgroundColor: display.color }} aria-label={display.color} />}
       {rows.length > 0 && (
         <dl className="toolCardRows">
@@ -2048,6 +2510,15 @@ export default function App() {
   const inputRef = useRef(null)
   const fileInputRef = useRef(null)
   const bootstrappedRef = useRef(false)
+
+  useEffect(() => {
+    setError(null)
+    const st = useStore.getState()
+    st.clearToolActivities()
+    st.clearStreamToolCards()
+    st.clearQueuedMessages()
+    st.setCurrentPreSearchId(null)
+  }, [setError])
 
   useEffect(() => {
     if (bootstrappedRef.current) return

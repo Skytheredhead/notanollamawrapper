@@ -1,10 +1,19 @@
 import crypto from 'node:crypto';
+import { calculate, graphMathFunctions } from './math-expr.js';
 import { WeatherClient } from './weather.js';
+import { convertCurrency } from './currency-frankfurter.js';
+import { fetchImagesForQuery } from './query-images.js';
+import { fetchSports } from './sports-espn.js';
+import { buildWorldClockRows } from './world-zones.js';
 
 const LOCAL_TOOL_NAMES = new Set([
   'calculate',
+  'graph_math',
   'convert_units',
+  'convert_currency',
   'date_time',
+  'world_clock',
+  'get_sports',
   'random_pick',
   'text_transform',
   'uuid_generate',
@@ -24,11 +33,7 @@ const LOCAL_TOOL_NAMES = new Set([
   'stopwatch_list'
 ]);
 
-const ALL_TOOL_NAMES = new Set([
-  'get_weather',
-  'web_search',
-  ...LOCAL_TOOL_NAMES
-]);
+const ALL_TOOL_NAMES = new Set(['get_weather', 'web_search', ...LOCAL_TOOL_NAMES]);
 
 function truncate(value, maxChars = 3000) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -45,8 +50,12 @@ function labelForTool(name) {
     get_weather: 'Weather',
     web_search: 'Web Search',
     calculate: 'Calculator',
+    graph_math: 'Graph',
     convert_units: 'Unit Conversion',
+    convert_currency: 'Currency',
     date_time: 'Date & Time',
+    world_clock: 'World clock',
+    get_sports: 'Sports',
     random_pick: 'Random Pick',
     text_transform: 'Text Transform',
     uuid_generate: 'UUID',
@@ -149,7 +158,7 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
         { label: 'Humidity', value: `${formatValue(current.humidityPercent)}%` },
         { label: 'Wind', value: `${formatValue(current.windMph)} mph` },
         { label: 'Precip', value: `${formatValue(current.precipitationIn)} in` },
-        ...(forecast.slice(0, 3).map((day) => ({
+        ...(forecast.slice(0, 7).map((day) => ({
           label: day.date,
           value: `${day.summary || 'Forecast'}, high ${formatValue(day.highF)}F, low ${formatValue(day.lowF)}F`
         })))
@@ -166,7 +175,7 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
           precipitationIn: current.precipitationIn,
           weatherCode: current.weatherCode
         },
-        daily: forecast.slice(0, 10).map((day) => ({
+        daily: forecast.slice(0, 7).map((day) => ({
           date: day.date,
           summary: day.summary,
           highF: day.highF,
@@ -184,6 +193,7 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
 
   if (name === 'web_search') {
     const results = Array.isArray(result.results) ? result.results : [];
+    const images = Array.isArray(result.images) ? result.images.filter((img) => img?.url) : [];
     const links = results
       .filter((item) => item?.url)
       .slice(0, 3)
@@ -199,7 +209,8 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
         { label: 'Fetched', value: result.fetchedCount ?? results.length },
         { label: 'Cache', value: toolResult.cacheHit || result.cacheHit ? 'hit' : 'miss' }
       ]),
-      links
+      links,
+      searchImages: images.slice(0, 12)
     };
   }
 
@@ -214,14 +225,75 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
     };
   }
 
+  if (name === 'graph_math') {
+    const series = Array.isArray(result.series) ? result.series : [];
+    const vp = result.viewport || {};
+    return {
+      title: 'Graph',
+      summary: truncateOneLine(series.map((s) => s.expression).join(' · ') || text),
+      mathGraph: {
+        expressions: result.expressions || series.map((s) => s.expression),
+        series,
+        viewport: {
+          xMin: vp.xMin,
+          xMax: vp.xMax,
+          yMin: vp.yMin,
+          yMax: vp.yMax
+        }
+      }
+    };
+  }
+
   if (name === 'convert_units') {
     return {
       title: 'Unit Conversion',
       summary: truncateOneLine(text),
+      unitConversion: {
+        value: result.value,
+        from: result.from,
+        to: result.to,
+        result: result.result
+      },
       rows: compactRows([
         { label: 'From', value: `${formatValue(result.value)} ${result.from || ''}`.trim() },
         { label: 'To', value: `${formatValue(result.result)} ${result.to || ''}`.trim() }
       ])
+    };
+  }
+
+  if (name === 'convert_currency') {
+    return {
+      title: 'Currency',
+      summary: truncateOneLine(text),
+      currencyConversion: {
+        amount: result.amount,
+        from: result.from,
+        to: result.to,
+        result: result.result,
+        rate: result.rate,
+        date: result.date
+      },
+      rows: compactRows([
+        { label: 'Rate', value: result.rate != null ? String(Number(result.rate.toPrecision(8))) : '—' },
+        { label: 'Date', value: result.date || '—' }
+      ])
+    };
+  }
+
+  if (name === 'world_clock') {
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    return {
+      title: 'World clock',
+      summary: truncateOneLine(result.text || text),
+      worldClock: { rows }
+    };
+  }
+
+  if (name === 'get_sports') {
+    return {
+      title: 'Sports',
+      summary: truncateOneLine(result.summary || text),
+      sports: result
     };
   }
 
@@ -345,11 +417,33 @@ export function toolSchemas({ allowed = ALL_TOOL_NAMES } = {}) {
     schema('calculate', 'Safely evaluate a math expression.', {
       expression: { type: 'string' }
     }, ['expression']),
+    schema('graph_math', 'Plot functions y=f(x) on a coordinate plane (variable x). Pass each curve as an expression of x, e.g. x^2, sin(x), 2*x+1. Use commas or multiple expressions for several curves.', {
+      expressions: { type: 'array', items: { type: 'string' } },
+      query: { type: 'string' },
+      xMin: { type: 'number' },
+      xMax: { type: 'number' },
+      yMin: { type: 'number' },
+      yMax: { type: 'number' }
+    }),
     schema('convert_units', 'Convert a value from one common unit to another.', {
       value: { type: 'number' },
       from: { type: 'string' },
       to: { type: 'string' }
     }, ['value', 'from', 'to']),
+    schema('convert_currency', 'Convert fiat currencies (live ECB-based rates via Frankfurter).', {
+      amount: { type: 'number' },
+      from: { type: 'string' },
+      to: { type: 'string' }
+    }, ['from', 'to']),
+    schema('world_clock', 'Current time in cities or IANA timezones (comma-separated).', {
+      places: { type: 'array', items: { type: 'string' } },
+      query: { type: 'string' }
+    }),
+    schema('get_sports', 'Scores, standings, team lookup, or player search (ESPN public JSON).', {
+      action: { type: 'string', enum: ['scores', 'standings', 'schedule', 'team', 'player'] },
+      league: { type: 'string' },
+      query: { type: 'string' }
+    }),
     schema('date_time', 'Answer date, time, duration, or date arithmetic questions.', {
       operation: { type: 'string', enum: ['now', 'duration_between', 'add_duration'] },
       timezone: { type: 'string' },
@@ -426,112 +520,6 @@ function number(value, name) {
 
 function words(text) {
   return String(text || '').trim().split(/\s+/).filter(Boolean);
-}
-
-class MathParser {
-  constructor(expression) {
-    this.tokens = String(expression || '').match(/pi|[a-z]+|\d+(?:\.\d+)?|\.\d+|[()+\-*/%^,]/gi) || [];
-    this.index = 0;
-  }
-
-  peek() { return this.tokens[this.index]; }
-  take() { return this.tokens[this.index++]; }
-
-  parse() {
-    const value = this.expression();
-    if (this.peek() != null) throw new Error(`Unexpected token: ${this.peek()}`);
-    return value;
-  }
-
-  expression() {
-    let value = this.term();
-    while (['+', '-'].includes(this.peek())) {
-      const op = this.take();
-      const right = this.term();
-      value = op === '+' ? value + right : value - right;
-    }
-    return value;
-  }
-
-  term() {
-    let value = this.power();
-    while (['*', '/', '%'].includes(this.peek())) {
-      const op = this.take();
-      const right = this.power();
-      if ((op === '/' || op === '%') && right === 0) throw new Error('Division by zero.');
-      if (op === '*') value *= right;
-      if (op === '/') value /= right;
-      if (op === '%') value %= right;
-    }
-    return value;
-  }
-
-  power() {
-    let value = this.unary();
-    while (this.peek() === '^') {
-      this.take();
-      value = value ** this.unary();
-    }
-    return value;
-  }
-
-  unary() {
-    if (this.peek() === '+') {
-      this.take();
-      return this.unary();
-    }
-    if (this.peek() === '-') {
-      this.take();
-      return -this.unary();
-    }
-    return this.primary();
-  }
-
-  primary() {
-    const token = this.take();
-    if (token == null) throw new Error('Incomplete expression.');
-    if (token === '(') {
-      const value = this.expression();
-      if (this.take() !== ')') throw new Error('Missing closing parenthesis.');
-      return value;
-    }
-    if (/^\d|\./.test(token)) return Number(token);
-    const lower = token.toLowerCase();
-    if (lower === 'pi') return Math.PI;
-    if (lower === 'e') return Math.E;
-    if (/^[a-z]+$/i.test(token)) {
-      if (this.take() !== '(') throw new Error(`Function ${token} needs parentheses.`);
-      const arg = this.expression();
-      if (this.take() !== ')') throw new Error('Missing closing parenthesis.');
-      const fn = {
-        sqrt: Math.sqrt,
-        abs: Math.abs,
-        round: Math.round,
-        floor: Math.floor,
-        ceil: Math.ceil,
-        sin: Math.sin,
-        cos: Math.cos,
-        tan: Math.tan,
-        log: Math.log10,
-        ln: Math.log
-      }[lower];
-      if (!fn) throw new Error(`Unknown function: ${token}`);
-      return fn(arg);
-    }
-    throw new Error(`Unexpected token: ${token}`);
-  }
-}
-
-function calculate({ expression }) {
-  const result = new MathParser(expression).parse();
-  const displayResult = Number.isInteger(result) ? String(result) : String(Number(result.toPrecision(12)));
-  return {
-    expression,
-    result,
-    displayResult,
-    equation: `${expression} = ${displayResult}`,
-    text: displayResult
-  };
 }
 
 const UNIT_FACTORS = {
@@ -707,20 +695,16 @@ function clientAction(name, action, args = {}, text = '') {
   };
 }
 
-function formatWeather(weather) {
+/** Short line for assistant message body; details stay in the weather widget. */
+function formatWeatherBrief(weather) {
   const current = weather.current;
-  const lines = [
-    `${weather.location}: ${current.summary}, ${current.temperatureF}F (feels like ${current.feelsLikeF}F).`,
-    `Humidity ${current.humidityPercent}%, wind ${current.windMph} mph, precipitation ${current.precipitationIn} in.`,
-    `Source: ${weather.source}, ${current.time || weather.timezone}.`
-  ];
-  if (weather.forecast?.length) {
-    lines.push('Forecast:');
-    for (const day of weather.forecast.slice(0, 3)) {
-      lines.push(`${day.date}: ${day.summary}, high ${day.highF}F, low ${day.lowF}F, precip ${day.precipitationChancePercent ?? '--'}%.`);
-    }
-  }
-  return lines.join('\n');
+  const loc = String(weather.location || 'Weather').split(',')[0].trim() || 'Weather';
+  const summary = current.summary || 'Current conditions';
+  const t = Number(current.temperatureF);
+  const f = Number(current.feelsLikeF);
+  const temp = Number.isFinite(t) ? `${Math.round(t)}°F` : '—';
+  const feels = Number.isFinite(f) ? `${Math.round(f)}°F` : '—';
+  return `${loc}: ${summary} — ${temp}, feels like ${feels}.`;
 }
 
 export function createToolRuntime(config, ollama, searchClientOrFetch = null, fetchImpl = fetch) {
@@ -732,22 +716,77 @@ export function createToolRuntime(config, ollama, searchClientOrFetch = null, fe
     timeoutMs: config.toolTimeoutMs,
     fetchImpl: weatherFetch
   });
-  return { config, ollama, searchClient, weatherClient };
+  return { config, ollama, searchClient, weatherClient, fetchImpl: weatherFetch };
+}
+
+function summarizeSportsDisplay(data, action) {
+  if (!data || data.error) return String(data?.error || 'Sports');
+  if (action === 'player') {
+    const n = data.players?.length || 0;
+    return n ? `${n} player match${n === 1 ? '' : 'es'}` : 'No players found';
+  }
+  if (action === 'team') {
+    return data.team?.name || data.message || 'Team';
+  }
+  if (action === 'standings') {
+    const n = data.standings?.length || 0;
+    return n ? `${n} teams` : 'Standings unavailable';
+  }
+  const g = data.games?.length || 0;
+  return g ? `${g} game${g === 1 ? '' : 's'}` : 'No games';
+}
+
+function extractCurrencyConversion(query) {
+  const m = String(query).match(
+    /(-?\d+(?:\.\d+)?)\s*(USD|EUR|GBP|JPY|CHF|CAD|AUD|CNY|INR|MXN|BRL|KRW|SEK|NOK|DKK|PLN|NZD|ZAR|SGD|HKD)\s+(?:to|in|→|=)\s*(USD|EUR|GBP|JPY|CHF|CAD|AUD|CNY|INR|MXN|BRL|KRW|SEK|NOK|DKK|PLN|NZD|ZAR|SGD|HKD)/i
+  );
+  if (!m) return null;
+  return { amount: Number(m[1]), from: m[2].toUpperCase(), to: m[3].toUpperCase() };
+}
+
+function extractWorldClockPlaces(query) {
+  const t = String(query).trim();
+  let m = t.match(/\b(?:what(?:'s| is)\s+)?time(?:\s+is\s+it)?\s+in\s+([^?]+)/i);
+  if (m) return m[1].split(/\s*,\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+  m = t.match(/\bworld\s+clock\s*(?:for\s+)?(.+)/i);
+  if (m) return m[1].split(/,/).map((s) => s.trim()).filter(Boolean);
+  m = t.match(/\b(?:clock|time)\s+for\s+(.+)/i);
+  if (m) return m[1].split(/\s*,\s*/).map((s) => s.trim()).filter(Boolean);
+  return null;
+}
+
+function extractSportsFast(query) {
+  const lower = String(query).toLowerCase();
+  if (!/\b(nfl|nba|mlb|nhl|epl|mls|ucl|cfb)\b/.test(lower)) return null;
+  const league = lower.match(/\b(nfl|nba|mlb|nhl|epl|mls|ucl|cfb)\b/)?.[1];
+  if (!league) return null;
+  if (/\bstandings?\b/.test(lower)) return { action: 'standings', league, query: '' };
+  const playerMatch = query.match(/\b(?:player|athlete)\s+([A-Za-z][A-Za-z '\-\.]{1,40})/);
+  if (playerMatch) return { action: 'player', league, query: playerMatch[1].trim() };
+  const teamMatch = query.match(/\bteam\s+([A-Za-z][A-Za-z '\-\.]{1,40})/i);
+  if (teamMatch) return { action: 'team', league, query: teamMatch[1].trim() };
+  if (/\b(schedule|scores?|games?|live)\b/.test(lower)) return { action: 'scores', league, query: '' };
+  return { action: 'scores', league, query: '' };
 }
 
 async function executeBuiltIn(name, args, runtime, { signal } = {}) {
   if (name === 'get_weather') {
-    const result = await runtime.weatherClient.forecast({ location: args.location, days: args.days, signal });
+    const result = await runtime.weatherClient.forecast({
+      location: args.location,
+      days: args.days != null ? args.days : 7,
+      signal
+    });
     return {
       name,
       result,
-      text: formatWeather(result),
+      text: formatWeatherBrief(result),
       cacheHit: Boolean(result.cacheHit),
       source: 'Open-Meteo',
       direct: true
     };
   }
   if (name === 'web_search') {
+    const fetchImpl = runtime.fetchImpl || globalThis.fetch;
     const search = runtime.searchClient
       ? await runtime.searchClient.search(String(args.query || ''), {
         maxResults: runtime.config.searchMaxResults || runtime.config.webSearchMaxResults,
@@ -759,16 +798,75 @@ async function executeBuiltIn(name, args, runtime, { signal } = {}) {
         skipped: 'provider_unavailable',
         message: 'Local search is not configured.'
       };
+    let images = [];
+    try {
+      images = await fetchImagesForQuery(String(args.query || ''), { fetchImpl, signal, limit: 10 });
+    } catch {
+      images = [];
+    }
     return {
       name,
-      result: search,
+      result: { ...search, images },
       text: truncate(search.results || search.message || [], runtime.config.toolMaxResultChars),
       cacheHit: Boolean(search.cacheHit),
       source: `Local ${search.provider || 'web'} search`
     };
   }
+  if (name === 'convert_currency') {
+    const amount = args.amount != null ? number(args.amount, 'amount') : 1;
+    const r = await convertCurrency(
+      { amount, from: args.from, to: args.to },
+      { fetchImpl: runtime.fetchImpl || globalThis.fetch, signal }
+    );
+    return { name, result: r, text: r.text, direct: true };
+  }
+  if (name === 'world_clock') {
+    const raw = args.places ?? args.query;
+    const places = Array.isArray(raw)
+      ? raw.map(String)
+      : String(raw || '')
+          .split(/[,;]|\s+and\s+/i)
+          .map((s) => s.trim())
+          .filter(Boolean);
+    if (!places.length) throw new Error('Specify at least one city.');
+    const rows = buildWorldClockRows(places);
+    if (!rows.length) {
+      throw new Error('Could not resolve those places. Try major cities (Tokyo, Paris) or an IANA zone like America/New_York.');
+    }
+    const text = rows.map((row) => `${row.label}: ${row.time} (${row.date})`).join(' · ');
+    return { name, result: { rows, places, text }, text, direct: true };
+  }
+  if (name === 'get_sports') {
+    const action = String(args.action || 'scores').toLowerCase();
+    const league = String(args.league || 'nfl').toLowerCase();
+    const query = String(args.query || '').trim();
+    const fetchImpl = runtime.fetchImpl || globalThis.fetch;
+    let payload;
+    try {
+      payload = await fetchSports({ action, league, query }, { fetchImpl, signal });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Sports unavailable';
+      return {
+        name,
+        result: { error: message, action, league, query, summary: message },
+        text: `Sports: ${message}`,
+        direct: true
+      };
+    }
+    const summary = summarizeSportsDisplay(payload, action);
+    return {
+      name,
+      result: { ...payload, action, league, query, summary },
+      text: summary,
+      direct: true
+    };
+  }
   if (name === 'calculate') {
     const result = calculate(args);
+    return { name, result, text: result.text, direct: true };
+  }
+  if (name === 'graph_math') {
+    const result = graphMathFunctions(args);
     return { name, result, text: result.text, direct: true };
   }
   if (name === 'convert_units') {
@@ -833,6 +931,37 @@ function extractWeatherLocation(query) {
     || String(query).match(/\b(?:in|for|at)\s+(.+?)\s+(?:weather|forecast|temperature)\b/i);
   if (!match) return '';
   return match[1].replace(/\b(today|tomorrow|this week|right now|now)\b/gi, '').trim().replace(/[?.!,]+$/, '');
+}
+
+function looksLikeGraphExpression(part) {
+  const s = String(part || '').trim();
+  if (!s || s.length > 220) return false;
+  return /[\d^*/+().\-]|\bx\b/i.test(s) || /\b(sin|cos|tan|sqrt|abs|log|ln|exp)\s*\(/i.test(s) || /\bpi\b/i.test(s);
+}
+
+function extractGraphExpressions(query) {
+  const t = String(query).trim();
+  const lower = t.toLowerCase();
+  const hasKeyword = /\b(graph|plot|grapher|desmos)\b/.test(lower);
+  const hasYEquals = /\by\s*=[^=]/.test(t);
+  if (!hasKeyword && !hasYEquals) return null;
+
+  let rest = t.replace(/^\s*(graph|plot|grapher|desmos)\s*/i, '').trim();
+  rest = rest.replace(/\b(of|the|equation|function|for|a|an)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+
+  let parts = rest
+    .split(/\s*(?:,|(?:\band\b)|;|\n)\s*/i)
+    .map((s) => s.replace(/^\s*y\s*=\s*/i, '').trim())
+    .filter(Boolean);
+
+  if (!parts.length && hasKeyword) {
+    const stripped = rest.replace(/\b(plot|graph)\b/gi, '').trim();
+    if (stripped) parts = [stripped];
+  }
+
+  parts = parts.filter(looksLikeGraphExpression);
+  if (!parts.length) return null;
+  return { expressions: parts.slice(0, 8) };
 }
 
 function extractExpression(query) {
@@ -952,11 +1081,13 @@ export function fastToolCandidate(query, { messages = [], state = {} } = {}) {
   if (/\b(weather|forecast|temperature|rain|snow|wind)\b/.test(lower)) {
     const location = extractWeatherLocation(text);
     if (!location) return { name: 'get_weather', args: {}, missing: 'location', directText: 'What location should I check the weather for?' };
-    return { name: 'get_weather', args: { location, days: /\bweek\b/.test(lower) ? 7 : 3 } };
+    return { name: 'get_weather', args: { location, days: 7 } };
   }
   if (/\b(open|show|bring up|launch)\b.{0,24}\bcalculator\b|\bcalculator\b.{0,24}\b(open|show|launch)\b/.test(lower)) {
     return { name: 'calculate', args: { expression: '0' } };
   }
+  const currency = extractCurrencyConversion(text);
+  if (currency) return { name: 'convert_currency', args: currency };
   const durationMs = parseDurationMs(text);
   if (/\btimer\b/.test(lower) && /\b(stop|cancel|end|clear)\b/.test(lower)) {
     const timer = latestActiveTimer(state);
@@ -985,7 +1116,9 @@ export function fastToolCandidate(query, { messages = [], state = {} } = {}) {
   }
   if (/\b(stopwatch)\b.*\b(start|begin)\b|\b(start|begin)\b.*\bstopwatch\b/.test(lower)) return { name: 'stopwatch_start', args: { label: 'Stopwatch' } };
   const weatherLocation = weatherFollowupLocation(text, messages);
-  if (weatherLocation) return { name: 'get_weather', args: { location: weatherLocation, days: 3 } };
+  if (weatherLocation) return { name: 'get_weather', args: { location: weatherLocation, days: 7 } };
+  const graphExprs = extractGraphExpressions(text);
+  if (graphExprs) return { name: 'graph_math', args: graphExprs };
   if (/\buuid\b/.test(lower)) return { name: 'uuid_generate', args: { count: Number(lower.match(/\b(\d+)\b/)?.[1] || 1) } };
   if (/\bpassword\b/.test(lower) && /\b(generate|make|create)\b/.test(lower)) return { name: 'password_generate', args: { length: Number(lower.match(/\b(\d{2,3})\b/)?.[1] || 20) } };
   const conversion = extractConversion(text);
@@ -1037,12 +1170,18 @@ export function fastToolCandidate(query, { messages = [], state = {} } = {}) {
   if (range) return { name: 'random_pick', args: range };
   const choices = extractChoices(text);
   if (choices) return { name: 'random_pick', args: { choices } };
+  const wcPlaces = extractWorldClockPlaces(text);
+  if (wcPlaces?.length) return { name: 'world_clock', args: { places: wcPlaces } };
+  const sportsFast = extractSportsFast(text);
+  if (sportsFast) return { name: 'get_sports', args: sportsFast };
   if (/\bwhat time\b|\bcurrent time\b|\btoday'?s date\b|\bwhat date\b/.test(lower)) return { name: 'date_time', args: { operation: 'now' } };
   return null;
 }
 
 export function likelyNeedsPlanning(query) {
-  return /\b(weather|forecast|search|look up|web|internet|calculate|convert|timer|stopwatch|uuid|hash|base64|json|color|password|random|pick|time|date)\b/i.test(String(query || ''));
+  return /\b(weather|forecast|search|look up|web|internet|calculate|graph|plot|desmos|convert|currency|usd|eur|nfl|nba|mlb|nhl|sport|score|standing|timer|stopwatch|uuid|hash|base64|json|color|password|random|pick|time|date|clock)\b/i.test(
+    String(query || '')
+  );
 }
 
 export async function runFastTool(query, runtime, { toolsOptions, signal, messages = [], state = {} } = {}) {

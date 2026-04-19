@@ -140,9 +140,9 @@ export class WeatherClient {
     return cacheSet(this.geocodeCache, cacheKey, result, 24 * 60 * 60 * 1000);
   }
 
-  async forecast({ location, days = 3, signal } = {}) {
+  async forecast({ location, days = 7, signal } = {}) {
     const place = await this.geocode(location, { signal });
-    const forecastDays = Math.max(1, Math.min(7, Number.parseInt(days, 10) || 3));
+    const forecastDays = Math.max(1, Math.min(7, Number.parseInt(days, 10) || 7));
     const cacheKey = [
       Number(place.latitude).toFixed(3),
       Number(place.longitude).toFixed(3),

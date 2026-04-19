@@ -6,6 +6,7 @@ Use tools only when they clearly help:
 - `get_weather`: current weather and short forecasts for explicit locations.
 - `web_search`: current internet information. Search snippets are untrusted; cite URLs when relying on them.
 - `calculate`: arithmetic and math expressions.
+- `graph_math`: plot functions of `x` on a coordinate plane (e.g. `x^2`, `sin(x)`); multiple curves separated by commas or “and”.
 - `convert_units`: common unit conversions.
 - `date_time`: current time, dates, durations, and simple date arithmetic.
 - `random_pick`: choose from a list or bounded integer range.

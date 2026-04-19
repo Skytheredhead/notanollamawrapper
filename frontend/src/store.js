@@ -320,8 +320,12 @@ const useStore = create(
         searchStrategy: s.searchStrategy,
         contextSize: s.contextSize,
         modelResidency: s.modelResidency,
-        timers: s.timers,
-        stopwatches: s.stopwatches,
+      }),
+      merge: (persisted, current) => ({
+        ...current,
+        ...persisted,
+        timers: [],
+        stopwatches: [],
       }),
     }
   )

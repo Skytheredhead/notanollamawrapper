@@ -83,8 +83,8 @@ test('weather fast path treats a location-only reply as the requested weather lo
     ]
   });
   assert.equal(result.name, 'get_weather');
-  assert.match(result.text, /Sammamish, Washington, United States/);
-  assert.match(result.text, /52F/);
+  assert.match(result.text, /^Sammamish:/);
+  assert.match(result.text, /52°F/);
 });
 
 test('stopwatch start is not treated as a weather follow-up location', async () => {
@@ -105,6 +105,21 @@ test('unit conversion handles common units', async () => {
   const result = await executeTool('convert_units', { value: 1, from: 'mile', to: 'km' }, runtime);
   assert.equal(result.name, 'convert_units');
   assert.ok(Math.abs(result.result.result - 1.609344) < 0.000001);
+});
+
+test('graph_math samples functions of x', async () => {
+  const runtime = createToolRuntime(config, { webSearch: async () => ({ results: [] }) });
+  const result = await executeTool('graph_math', { expressions: ['x^2'], xMin: -2, xMax: 2 }, runtime);
+  assert.equal(result.name, 'graph_math');
+  assert.ok(Array.isArray(result.result.series));
+  assert.ok(result.result.series[0].points.length > 50);
+  const mid = result.result.series[0].points[Math.floor(result.result.series[0].points.length / 2)];
+  assert.ok(Math.abs(mid.x) < 0.1);
+  assert.ok(Math.abs(mid.y) < 0.05);
+  const toolsOptions = toolOptionsFromBody({}, { webSearch: false });
+  const fast = await runFastTool('plot sin(x) and cos(x)', runtime, { toolsOptions });
+  assert.equal(fast.name, 'graph_math');
+  assert.ok(fast.result.expressions.length >= 2);
 });
 
 test('hardcoded utility prompts trigger deterministic fast paths', async () => {
