@@ -129,8 +129,14 @@ export function useChat() {
   }
 
   const handleToolEvent = (event) => {
+    if (event.event === 'generation_start') {
+      setStreamSearchStatus(null)
+      return
+    }
     if (event.event === 'search_status') {
-      setStreamSearchStatus(event.phase === 'searching' ? event : null)
+      setStreamSearchStatus(
+        event.phase === 'searching' || event.phase === 'finding_weather' ? event : null
+      )
       return
     }
     const card = toolEventToCard(event)

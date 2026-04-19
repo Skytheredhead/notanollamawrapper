@@ -20,10 +20,12 @@ import {
   formatToolContext,
   likelyNeedsPlanning,
   runFastTool,
+  fastToolCandidate,
   toolOptionsFromBody,
   toolSchemas,
   truncate
 } from './tool-registry.js';
+import { maybeAutoTitleChatFromFirstUserMessage } from './chat-title.js';
 
 function requireString(value, fallback = null) {
   if (typeof value !== 'string') return fallback;
@@ -535,7 +537,7 @@ function buildMessageMetadata({
       doneReason,
       webSearchMs: search?.used ? (search.elapsedMs || 0) : 0,
       webSearch: search,
-      sources: searchContext?.sources || [],
+      sources: searchContext?.used ? (searchContext.sources || []) : [],
       toolCards: toolCards.slice(-8),
       toolActions: toolActions.slice(-8),
       promptBuildMs: Number.isFinite(Number(modelMeta?.chatTemplateMs)) ? Number(modelMeta.chatTemplateMs) : null,
@@ -830,6 +832,22 @@ async function streamAssistantReply({
     }
     const toolResults = [];
 
+    let weatherLocationHint = '';
+    let skipWebSearchForFastTool = false;
+    if (toolsOptions.enabled && query) {
+      try {
+        const cand = fastToolCandidate(query, { messages: workingMessages, state: tools?.state || {} });
+        if (cand?.name && toolsOptions.allowed.has(cand.name)) {
+          skipWebSearchForFastTool = true;
+          if (cand.name === 'get_weather' && !cand.missing && cand.args?.location) {
+            weatherLocationHint = String(cand.args.location).trim();
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     searchContext = await withWebSearchContext({
       searchClient,
       preSearchManager,
@@ -837,7 +855,7 @@ async function streamAssistantReply({
       messages: workingMessages,
       chatId: chat.id,
       preSearchId,
-      enabled: webSearch,
+      enabled: webSearch && !skipWebSearchForFastTool,
       signal: entry.abortController.signal,
       searchMode,
       searchStrategy,
@@ -868,6 +886,12 @@ async function streamAssistantReply({
     workingMessages = searchContext.messages;
 
     if (toolsOptions.enabled && query) {
+      if (skipWebSearchForFastTool && weatherLocationHint) {
+        await writeSse(response, 'search_status', {
+          phase: 'finding_weather',
+          location: weatherLocationHint
+        });
+      }
       const startedAt = Date.now();
       let fastResult = null;
       try {
@@ -1273,7 +1297,7 @@ function createGeneration({ db, generationManager, chat, model }) {
   }
 }
 
-export function registerRoutes(app, { config, db, ollama, generationManager, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
+export function registerRoutes(app, { config, db, ollama, generationManager, mlxSidecar = null, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
   const toolRuntime = createToolRuntime(config, ollama, searchClient);
 
   app.get('/health', async () => {
@@ -1346,6 +1370,30 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
     }
     try {
       return await ollama.mlx.getVersion();
+    } catch (error) {
+      return sendError(reply, 503, 'mlx_unavailable', error.message);
+    }
+  });
+
+  app.post('/api/mlx/start', async (request, reply) => {
+    if (!mlxSidecar || typeof mlxSidecar.start !== 'function') {
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be started from this backend.');
+    }
+    try {
+      mlxSidecar.start();
+      return { started: true };
+    } catch (error) {
+      return sendError(reply, 503, 'mlx_unavailable', error.message);
+    }
+  });
+
+  app.post('/api/mlx/stop', async (request, reply) => {
+    if (!mlxSidecar || typeof mlxSidecar.stop !== 'function') {
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be stopped from this backend.');
+    }
+    try {
+      mlxSidecar.stop();
+      return { stopped: true };
     } catch (error) {
       return sendError(reply, 503, 'mlx_unavailable', error.message);
     }
@@ -1465,7 +1513,13 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
       };
     }
     const body = request.body || {};
-    const chat = assertChat(db, request.body?.chatId);
+    if (!body || typeof body !== 'object') {
+      throw badRequest('invalid_body', 'Request body is required.');
+    }
+    if (!body.chatId) {
+      throw badRequest('missing_chat_id', 'chatId is required.');
+    }
+    const chat = assertChat(db, body.chatId);
     try {
       return await preSearchManager.analyze({
         chatId: chat.id,
@@ -1486,7 +1540,11 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
   });
 
   app.post('/api/sources/summarize', async (request, reply) => {
-    const sources = Array.isArray(request.body?.sources) ? request.body.sources : [];
+    const body = request.body || {};
+    if (body.sources !== undefined && !Array.isArray(body.sources)) {
+      throw badRequest('invalid_sources', 'sources must be an array.');
+    }
+    const sources = Array.isArray(body.sources) ? body.sources : [];
     const streamMode = request.query?.stream === '1' || request.query?.stream === 'true';
     let enrichedSources = sources.slice(0, 10);
     if (searchClient && typeof searchClient.fetchPagesForResults === 'function') {
@@ -1536,6 +1594,9 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
 
   app.post('/api/chats', async (request, reply) => {
     const body = request.body || {};
+    if (!body || typeof body !== 'object') {
+      throw badRequest('invalid_body', 'Request body is required.');
+    }
     const chat = db.createChat({
       title: requireString(body.title, 'New chat'),
       model: requireString(body.model),
@@ -1590,6 +1651,13 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
 
       db.createUserMessageWithAttachments(chat.id, content || '', attachments);
       attachmentsPersisted = true;
+      void maybeAutoTitleChatFromFirstUserMessage({
+        db,
+        ollama,
+        config,
+        chatId: chat.id,
+        userContent: content || ''
+      }).catch(() => {});
       const refreshedChat = db.getChat(chat.id);
       const { entry, assistantMessage } = createGeneration({
         db,
@@ -1634,6 +1702,9 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
 
   app.post('/api/chats/:chatId/messages/:messageId/edit', async (request, reply) => {
     const body = request.body || {};
+    if (!body || typeof body !== 'object') {
+      throw badRequest('invalid_body', 'Request body is required.');
+    }
     const content = requireString(body.content, '');
     if (!content) {
       throw badRequest('empty_message', 'Message content is required.');
@@ -1674,6 +1745,13 @@ export function registerRoutes(app, { config, db, ollama, generationManager, sea
         db.markMessageReplaced(message.id);
       }
       db.createUserMessage(chat.id, content);
+      void maybeAutoTitleChatFromFirstUserMessage({
+        db,
+        ollama,
+        config,
+        chatId: chat.id,
+        userContent: content || ''
+      }).catch(() => {});
       assistantMessage = db.createAssistantMessage(chat.id, entry.generationId);
       entry.assistantMessageId = assistantMessage.id;
       db.setChatModelIfEmpty(chat.id, model);

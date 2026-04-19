@@ -4,7 +4,7 @@ import { ApiError, sendError } from './errors.js';
 import { registerFrontend } from './frontend.js';
 import { registerRoutes } from './routes.js';
 
-export function buildApp({ config, db, ollama, generationManager, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
+export function buildApp({ config, db, ollama, generationManager, mlxSidecar = null, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
   const app = Fastify({
     logger: false,
     bodyLimit: 24 * 1024 * 1024
@@ -49,6 +49,7 @@ export function buildApp({ config, db, ollama, generationManager, searchClient =
     db,
     ollama,
     generationManager,
+    mlxSidecar,
     searchClient,
     preSearchManager,
     sourceSummaryCache

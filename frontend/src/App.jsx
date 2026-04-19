@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import adapter from './adapter'
 import MessageContent from './components/MessageContent'
 import useStore from './store'
@@ -546,7 +546,8 @@ function AnimatedStatValue({ value, numericValue, width = '6ch' }) {
   )
 }
 
-function BackendStats({ selectedModel, active }) {
+function BackendStats({ selectedModel, active, backendPhase }) {
+  const backendOnline = backendPhase === 'online'
   const [stats, setStats] = useState(null)
   const [cpuDisplayValue, setCpuDisplayValue] = useState(null)
   const lastCpuDisplayAtRef = useRef(0)
@@ -555,6 +556,11 @@ function BackendStats({ selectedModel, active }) {
   const streamMetrics = useStore((s) => s.streamMetrics)
 
   useEffect(() => {
+    if (!backendOnline) {
+      setStats(null)
+      setCpuDisplayValue(null)
+      return
+    }
     let cancelled = false
     let timer = null
     const isActive = () => !document.hidden && document.hasFocus()
@@ -592,7 +598,7 @@ function BackendStats({ selectedModel, active }) {
       window.removeEventListener('focus', refreshIfActive)
       window.removeEventListener('blur', schedule)
     }
-  }, [selectedModel, active])
+  }, [selectedModel, active, backendOnline])
 
   useEffect(() => {
     if (!stats) return
@@ -603,19 +609,26 @@ function BackendStats({ selectedModel, active }) {
     }
   }, [stats])
 
-  const cpu = formatPercent(cpuDisplayValue)
-  const ram = formatBytes(stats?.ram?.rssBytes)
-  const gpu = stats?.gpu?.available ? formatPercent(stats.gpu.usagePercent) : '--'
+  const cpu = backendOnline ? formatPercent(cpuDisplayValue) : '--'
+  const ram = backendOnline ? formatBytes(stats?.ram?.rssBytes) : '--'
+  const gpu = backendOnline && stats?.gpu?.available ? formatPercent(stats.gpu.usagePercent) : '--'
   const latestPromptTokens = useMemo(() => {
     if (Number.isFinite(Number(streamMetrics?.promptTokens))) return Number(streamMetrics.promptTokens)
     const latest = [...messages].reverse().find((message) => Number.isFinite(Number(message?.metrics?.promptTokens || message?.metadata?.metrics?.promptTokens)))
     return Number(latest?.metrics?.promptTokens || latest?.metadata?.metrics?.promptTokens || 0)
   }, [messages, streamMetrics])
   const contextPercent = Math.max(0, Math.min(100, latestPromptTokens && contextSize ? (latestPromptTokens / contextSize) * 100 : 0))
-  const contextValue = formatPercent(contextPercent)
+  const contextValue = backendOnline ? formatPercent(contextPercent) : '--'
 
   return (
-    <div className="backendStats" aria-live="polite">
+    <div className={`backendStats ${active ? 'backendStats--active' : 'backendStats--idle'}`} aria-live="polite">
+      <span className="statItem">
+        <span className={`backendDot is-${backendPhase}`} aria-hidden="true" />
+        <strong>BACKEND</strong>
+        <span className="statValue" style={{ '--stat-width': '7.5ch' }}>
+          <span className="statValueItem current">{backendOnline ? 'online' : backendPhase === 'starting' ? 'starting' : 'offline'}</span>
+        </span>
+      </span>
       <span className="statItem"><strong>CPU</strong> <AnimatedStatValue value={cpu} numericValue={cpuDisplayValue} width="5.5ch" /></span>
       <span className="statItem"><strong>RAM</strong> <AnimatedStatValue value={ram} numericValue={stats?.ram?.rssBytes} width="9ch" /></span>
       <span className="statItem"><strong>GPU</strong> <AnimatedStatValue value={gpu} numericValue={stats?.gpu?.usagePercent} width="5.5ch" /></span>
@@ -635,6 +648,228 @@ function formatDuration(ms) {
   if (h) return `${h}h ${m}m ${s}s`
   if (m) return `${m}m ${s}s`
   return `${s}s`
+}
+
+function formatStopwatchCentiseconds(ms) {
+  const total = Math.max(0, Math.floor(Number(ms || 0)))
+  const cs = Math.floor((total % 1000) / 10)
+  const sec = Math.floor((total / 1000) % 60)
+  const min = Math.floor((total / 60000) % 60)
+  const hour = Math.floor(total / 3600000)
+  const pad2 = (n) => String(n).padStart(2, '0')
+  if (hour > 0) return `${hour}:${pad2(min)}:${pad2(sec)}.${pad2(cs)}`
+  return `${pad2(min)}:${pad2(sec)}.${pad2(cs)}`
+}
+
+function formatTimerClock(remainingMs) {
+  const total = Math.max(0, Math.ceil(remainingMs / 1000))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function timerRemainingMs(timer, now) {
+  if (!timer || timer.status === 'cancelled') return 0
+  if (timer.status === 'paused') return Math.max(0, timer.pausedRemainingMs || 0)
+  if (timer.status === 'active') return Math.max(0, timer.targetAt - now)
+  return 0
+}
+
+function isLiveActivityChatCard(card) {
+  const n = card?.name || card?.toolName || card?.action
+  return [
+    'timer_start',
+    'timer_cancel',
+    'timer_adjust',
+    'timer_set',
+    'timer_list',
+    'timer_pause',
+    'timer_resume',
+    'stopwatch_start',
+    'stopwatch_stop',
+    'stopwatch_reset',
+    'stopwatch_list',
+  ].includes(n)
+}
+
+function IconPauseGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" className="liveActivityGlyph">
+      <rect x="3" y="2" width="3.5" height="10" rx="1" fill="currentColor" />
+      <rect x="7.5" y="2" width="3.5" height="10" rx="1" fill="currentColor" />
+    </svg>
+  )
+}
+
+function IconPlayGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" className="liveActivityGlyph">
+      <path d="M4 2.5 L12 7 L4 11.5 Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+function IconCloseGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="liveActivityGlyph">
+      <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function IconResetGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" className="liveActivityGlyph liveActivityGlyph--reset">
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 12a9 9 0 1 0 3-6.7"
+      />
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 4v6h6"
+      />
+    </svg>
+  )
+}
+
+const MAX_LIVE_ACTIVITY = 5
+
+function LiveActivityDock() {
+  const timers = useStore((s) => s.timers)
+  const stopwatches = useStore((s) => s.stopwatches)
+  const applyClientToolAction = useStore((s) => s.applyClientToolAction)
+  const [now, setNow] = useState(() => Date.now())
+  const [dismissedStopwatches, setDismissedStopwatches] = useState(() => new Set())
+
+  useEffect(() => {
+    const needFast =
+      timers.some((t) => t.status === 'active' || t.status === 'paused') ||
+      stopwatches.some((w) => w.running)
+    if (!needFast) return undefined
+    const id = window.setInterval(() => setNow(Date.now()), 100)
+    return () => window.clearInterval(id)
+  }, [timers, stopwatches])
+
+  const visibleTimers = timers.filter((t) => {
+    if (t.status === 'cancelled') return false
+    if (t.status === 'paused') return true
+    if (t.status === 'active') return timerRemainingMs(t, now) > 0
+    return false
+  })
+
+  const visibleStopwatches = stopwatches.filter((w) => !dismissedStopwatches.has(w.id))
+
+  const shownTimers = visibleTimers.slice(0, MAX_LIVE_ACTIVITY)
+  const remainingSlots = Math.max(0, MAX_LIVE_ACTIVITY - shownTimers.length)
+  const shownStopwatches = visibleStopwatches.slice(0, remainingSlots)
+
+  if (!shownTimers.length && !shownStopwatches.length) return null
+
+  return (
+    <div className="liveActivityDock" role="region" aria-label="Timers and stopwatches">
+      {shownTimers.map((timer) => {
+        const rem = timerRemainingMs(timer, now)
+        const isPaused = timer.status === 'paused'
+        const label = timer.label || 'Timer'
+        return (
+          <div key={timer.id} className="liveActivityPill liveActivityPill--timer">
+            <div className="liveActivityControls">
+              <button
+                type="button"
+                className="liveActivityBtn liveActivityBtn--primary"
+                aria-label={isPaused ? 'Resume timer' : 'Pause timer'}
+                onClick={() =>
+                  applyClientToolAction({ action: isPaused ? 'timer_resume' : 'timer_pause', id: timer.id })
+                }
+              >
+                {isPaused ? <IconPlayGlyph /> : <IconPauseGlyph />}
+              </button>
+              <button
+                type="button"
+                className="liveActivityBtn liveActivityBtn--ghost"
+                aria-label="Cancel timer"
+                onClick={() => applyClientToolAction({ action: 'timer_cancel', id: timer.id })}
+              >
+                <IconCloseGlyph />
+              </button>
+            </div>
+            <div className="liveActivityReadout">
+              <span className="liveActivityKind">{label}</span>
+              <span className="liveActivityTime">{formatTimerClock(rem)}</span>
+            </div>
+          </div>
+        )
+      })}
+      {shownStopwatches.map((watch) => {
+        const elapsed = watch.running ? watch.elapsedMs + (now - watch.startedAt) : watch.elapsedMs
+        const running = watch.running
+        return (
+          <div key={watch.id} className="liveActivityPill liveActivityPill--stopwatch">
+            <div className="liveActivityControls">
+              {running ? (
+                <>
+                  <button
+                    type="button"
+                    className="liveActivityBtn liveActivityBtn--primary"
+                    aria-label="Pause stopwatch"
+                    onClick={() => applyClientToolAction({ action: 'stopwatch_stop', id: watch.id })}
+                  >
+                    <IconPauseGlyph />
+                  </button>
+                  <button
+                    type="button"
+                    className="liveActivityBtn liveActivityBtn--ghost"
+                    aria-label="Reset stopwatch"
+                    onClick={() => applyClientToolAction({ action: 'stopwatch_reset', id: watch.id })}
+                  >
+                    <IconResetGlyph />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="liveActivityBtn liveActivityBtn--primary"
+                    aria-label="Start stopwatch"
+                    onClick={() =>
+                      applyClientToolAction({
+                        action: 'stopwatch_start',
+                        id: watch.id,
+                        label: watch.label || 'Stopwatch',
+                      })
+                    }
+                  >
+                    <IconPlayGlyph />
+                  </button>
+                  <button
+                    type="button"
+                    className="liveActivityBtn liveActivityBtn--ghost"
+                    aria-label="Dismiss"
+                    onClick={() =>
+                      setDismissedStopwatches((prev) => new Set(prev).add(watch.id))
+                    }
+                  >
+                    <IconCloseGlyph />
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="liveActivityReadout">
+              <span className="liveActivityTime liveActivityTime--wide">{formatStopwatchCentiseconds(elapsed)}</span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function formatCalculatorNumber(value) {
@@ -713,6 +948,149 @@ function applyCalculatorKey(state, key) {
   return state
 }
 
+function weatherEmojiFromCode(code) {
+  const value = Number(code)
+  if (!Number.isFinite(value)) return '🌤️'
+  if (value === 0) return '☀️'
+  if ([1, 2, 3].includes(value)) return '🌤️'
+  if ([45, 48].includes(value)) return '🌫️'
+  if ([51, 53, 55, 56, 57].includes(value)) return '🌦️'
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(value)) return '🌧️'
+  if ([71, 73, 75, 77, 85, 86].includes(value)) return '❄️'
+  if ([95, 96, 99].includes(value)) return '⛈️'
+  return '🌤️'
+}
+
+function formatWeekdayShort(isoDate) {
+  if (!isoDate) return ''
+  const d = new Date(`${String(isoDate).slice(0, 10)}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return String(isoDate).slice(0, 3)
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] || ''
+}
+
+function formatHourShort(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString(undefined, { hour: 'numeric' })
+}
+
+function tempFromF(f, unit) {
+  const n = Number(f)
+  if (!Number.isFinite(n)) return null
+  if (unit === 'C') return Math.round((n - 32) * (5 / 9))
+  return Math.round(n)
+}
+
+function WeatherChatGptWidget({ weather }) {
+  const fillGradientId = `wgrad-${useId().replace(/:/g, '')}`
+  const [unit, setUnit] = useState('F')
+  const [selectedDay, setSelectedDay] = useState(0)
+  const daily = Array.isArray(weather?.daily) ? weather.daily : []
+  const hourly = Array.isArray(weather?.hourly) ? weather.hourly : []
+  const current = weather?.current || {}
+  const location = String(weather?.location || 'Weather').trim()
+
+  const displayTemp = tempFromF(current.temperatureF, unit)
+  const feels = tempFromF(current.feelsLikeF, unit)
+
+  const chartPoints = useMemo(() => {
+    if (!hourly.length) return { line: '', area: '', labels: [], coords: [], minT: null, maxT: null }
+    const temps = hourly.map((h) => Number(h.temperatureF)).filter((t) => Number.isFinite(t))
+    if (!temps.length) return { line: '', area: '', labels: [], coords: [], minT: null, maxT: null }
+    const minT = Math.min(...temps)
+    const maxT = Math.max(...temps)
+    const pad = maxT - minT < 3 ? 2 : (maxT - minT) * 0.12
+    const lo = minT - pad
+    const hi = maxT + pad
+    const w = 100
+    const h = 100
+    const denom = Math.max(1, hourly.length - 1)
+    const coords = hourly.map((row, i) => {
+      const x = (i / denom) * w
+      const t = Number(row.temperatureF)
+      const yn = Number.isFinite(t) ? h - ((t - lo) / (hi - lo || 1)) * (h - 8) - 4 : h / 2
+      return { x, y: yn, t, time: row.time }
+    })
+    const line = coords.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
+    const area = `0,100 ${line} 100,100`
+    const labels = coords.filter((_, i) => i % 3 === 0)
+    return { line, area, labels, coords, minT, maxT }
+  }, [hourly])
+
+  return (
+    <div className="weatherChatgptCard">
+      <div className="weatherChatgptHeader">
+        <div className="weatherChatgptLocation">{location}</div>
+        <div className="weatherChatgptHero">
+          <div className="weatherChatgptTempBlock">
+            <span className="weatherChatgptTemp">{displayTemp != null ? `${displayTemp}°` : '—'}</span>
+            <div className="weatherChatgptUnitToggle" role="group" aria-label="Temperature unit">
+              <button type="button" className={unit === 'F' ? 'isActive' : ''} onClick={() => setUnit('F')}>F</button>
+              <span className="weatherChatgptUnitSep">/</span>
+              <button type="button" className={unit === 'C' ? 'isActive' : ''} onClick={() => setUnit('C')}>C</button>
+            </div>
+          </div>
+          <div className="weatherChatgptCondition">{current.summary || 'Current conditions'}</div>
+        </div>
+      </div>
+
+      {daily.length > 0 && (
+        <div className="weatherChatgptDaily" role="list">
+          {daily.slice(0, 10).map((day, index) => (
+            <button
+              key={`${day.date}-${index}`}
+              type="button"
+              className={`weatherChatgptDay ${selectedDay === index ? 'isSelected' : ''}`}
+              onClick={() => setSelectedDay(index)}
+              role="listitem"
+            >
+              <span className="weatherChatgptDayName">{formatWeekdayShort(day.date)}</span>
+              <span className="weatherChatgptDayIcon" aria-hidden="true">{weatherEmojiFromCode(day.weatherCode)}</span>
+              <span className="weatherChatgptDayHigh">{tempFromF(day.highF, unit)}°</span>
+              <span className="weatherChatgptDayLow">{tempFromF(day.lowF, unit)}°</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {hourly.length > 0 && chartPoints.line && (
+        <div className="weatherChatgptChart">
+          <div className="weatherChatgptChartHead">
+            <div className="weatherChatgptChartLabel">Temperature</div>
+            {chartPoints.minT != null && chartPoints.maxT != null && (
+              <div className="weatherChatgptChartHiLo" aria-hidden="true">
+                High {tempFromF(chartPoints.maxT, unit)}° · Low {tempFromF(chartPoints.minT, unit)}°
+              </div>
+            )}
+          </div>
+          <svg className="weatherChatgptSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgba(255, 149, 85, 0.35)" />
+                <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+              </linearGradient>
+            </defs>
+            <polygon className="weatherChatgptArea" points={chartPoints.area} fill={`url(#${fillGradientId})`} />
+            <polyline className="weatherChatgptLine" fill="none" points={chartPoints.line} />
+          </svg>
+          <div className="weatherChatgptAxis">
+            {chartPoints.labels.map((p, i) => (
+              <span key={`${p.time}-${i}`}>{formatHourShort(p.time)}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="weatherChatgptMeta">
+        {feels != null && <span>Feels like {feels}°{unit}</span>}
+        {Number.isFinite(Number(current.humidityPercent)) && <span>Humidity {Math.round(Number(current.humidityPercent))}%</span>}
+        {Number.isFinite(Number(current.windMph)) && <span>Wind {Number(current.windMph).toFixed(1)} mph</span>}
+      </div>
+    </div>
+  )
+}
+
 function normalizeToolCard(card) {
   const action = card?.action && typeof card.action === 'object' ? card.action : card
   const display = card?.display || action?.display || null
@@ -753,10 +1131,7 @@ function fallbackToolTitle(card) {
 }
 
 function ToolCard({ card, now, messageAt }) {
-  const timers = useStore((s) => s.timers)
-  const stopwatches = useStore((s) => s.stopwatches)
   const upsertCalculator = useStore((s) => s.upsertCalculator)
-  const applyClientToolAction = useStore((s) => s.applyClientToolAction)
   const display = card.display || {}
   const actionName = card.action || card.name || card.toolName
   const calculator = display.calculator || null
@@ -782,57 +1157,11 @@ function ToolCard({ card, now, messageAt }) {
     })
   }, [calculator, calculatorId, calcState.expression, calcState.display, upsertCalculator])
 
-  if (actionName === 'timer_start') {
-    const local = card.toolCallId ? timers.find((timer) => timer.toolCallId === card.toolCallId) : null
-    const durationMs = Math.max(1, Number(card.durationMs || local?.durationMs || 0))
-    const startedAt = local?.createdAt || card.startedAt || card.at || messageAt
-    const targetAt = local?.targetAt || startedAt + durationMs
-    const remaining = targetAt - now
-    const cancelled = local?.status === 'cancelled'
-    done = !cancelled && remaining <= 0
-    title = card.label || local?.label || title || 'Timer'
-    summary = cancelled ? 'cancelled' : done ? 'done' : formatDuration(remaining)
-    status = cancelled ? 'cancelled' : done ? 'done' : 'running'
-    const progress = Math.max(0, Math.min(1, 1 - Math.max(0, remaining) / durationMs))
-    const timerId = local?.id || card.id || ''
+  if (display.weather) {
     return (
-      <div className={`messageToolCard timeToolCard timerToolCard ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''}`}>
-        <div className="timeDial" style={{ '--progress': `${Math.round(progress * 360)}deg` }}>
-          <strong>{summary}</strong>
-          <span>{title}</span>
-        </div>
-        <div className="timeToolActions">
-          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_adjust', id: timerId, deltaMs: 60000 })} disabled={!timerId || status !== 'running'}>+1m</button>
-          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_adjust', id: timerId, deltaMs: -60000 })} disabled={!timerId || status !== 'running'}>-1m</button>
-          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_cancel', id: timerId })} disabled={!timerId || status !== 'running'}>Stop</button>
-        </div>
-      </div>
-    )
-  }
-
-  if (actionName === 'stopwatch_start') {
-    const local = card.toolCallId ? stopwatches.find((watch) => watch.toolCallId === card.toolCallId) : null
-    const startedAt = local?.startedAt || card.startedAt || card.at || messageAt
-    const elapsed = local
-      ? local.elapsedMs + (local.running ? now - local.startedAt : 0)
-      : Math.max(0, now - startedAt)
-    title = card.label || local?.label || title || 'Stopwatch'
-    summary = formatDuration(elapsed)
-    status = local?.running === false ? 'stopped' : 'running'
-    const watchId = local?.id || card.id || ''
-    return (
-      <div className={`messageToolCard timeToolCard stopwatchToolCard ${status === 'running' ? 'isRunning' : 'isDone'}`}>
-        <div className="stopwatchCrown" aria-hidden="true" />
-        <div className="timeDial stopwatchDial">
-          <strong>{summary}</strong>
-          <span>{title}</span>
-        </div>
-        <div className="timeToolActions">
-          <button type="button" onClick={() => applyClientToolAction({ action: local?.running === false ? 'stopwatch_start' : 'stopwatch_stop', id: watchId, label: title })} disabled={!watchId}>
-            {local?.running === false ? 'Start' : 'Stop'}
-          </button>
-          <button type="button" onClick={() => applyClientToolAction({ action: 'stopwatch_reset', id: watchId })} disabled={!watchId}>Reset</button>
-        </div>
+      <div className={`messageToolCard weatherChatgptWrap ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''} ${status === 'error' ? 'isError' : ''}`}>
+        <WeatherChatGptWidget weather={display.weather} />
+        {card.error && status === 'error' && <span className="toolCardError">{card.error}</span>}
       </div>
     )
   }
@@ -926,6 +1255,7 @@ function ToolCard({ card, now, messageAt }) {
 function MessageToolCards({ message, toolCards = [], now, includeCalculators = false }) {
   const cards = normalizedToolCardsForMessage(message, toolCards)
     .filter((card) => includeCalculators || !isCalculatorCard(card))
+    .filter((card) => !isLiveActivityChatCard(card))
 
   if (!cards.length) return null
 
@@ -940,7 +1270,23 @@ function MessageToolCards({ message, toolCards = [], now, includeCalculators = f
   )
 }
 
+function formatFindingWeatherLocation(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return 'your area'
+  const first = s.split(',')[0].trim()
+  return first || s
+}
+
 function SearchingPlaceholder({ status }) {
+  if (status?.phase === 'finding_weather') {
+    const where = formatFindingWeatherLocation(status.location)
+    return (
+      <div className="searchingPlaceholder" role="status" aria-live="polite">
+        <span className="searchingDots" aria-hidden="true"><span /><span /><span /></span>
+        <span>{`Finding weather in ${where}`}</span>
+      </div>
+    )
+  }
   const raw = String(status?.query || '').trim()
   const display = raw.length > 88 ? `${raw.slice(0, 88)}…` : raw
   const label = display ? `Searching: ${display}` : 'Searching…'
@@ -977,22 +1323,48 @@ function AssistantMessageBody({ message, toolCards = [], now, content }) {
   )
 }
 
-function SearchBox({ chats, onSelect }) {
+function IconMagnifyingGlass() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M15.2 15.2 20 20" />
+    </svg>
+  )
+}
+
+function IconNewChatHeader() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2Z" />
+      <path d="M14 2v6h6" />
+      <path d="M8 14h8M8 18h5" />
+    </svg>
+  )
+}
+
+function IconSettingsSliders() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 21v-7M4 10V3" />
+      <path d="M12 21v-9M12 8V3" />
+      <path d="M20 21v-5M20 12V3" />
+      <circle cx="4" cy="14" r="2" />
+      <circle cx="12" cy="11" r="2" />
+      <circle cx="20" cy="16" r="2" />
+    </svg>
+  )
+}
+
+function ChatSearchPanel({ chats, onSelect, onClose, autoFocus }) {
   const inputRef = useRef(null)
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState([])
 
   useEffect(() => {
-    const onKey = (event) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
-        event.preventDefault()
-        inputRef.current?.focus()
-        inputRef.current?.select()
-      }
+    if (autoFocus) {
+      requestAnimationFrame(() => inputRef.current?.focus())
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [autoFocus])
 
   useEffect(() => {
     let cancelled = false
@@ -1034,29 +1406,77 @@ function SearchBox({ chats, onSelect }) {
   }, [index, query])
 
   return (
-    <div className="searchWrap">
-      <svg className="searchIcon" viewBox="0 0 20 20" aria-hidden="true">
-        <circle cx="8.5" cy="8.5" r="5.25" />
-        <path d="M12.5 12.5 17 17" />
-      </svg>
-      <input ref={inputRef} className="searchInput" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="" aria-label="Search chats" />
-      {!query && (
-        <span className="searchPlaceholder" aria-hidden="true">
-          <span className="cmdSymbol">⌘</span>
-          <span className="shortcutPlus">+</span>
-          <span>F</span>
-        </span>
-      )}
+    <div className="chatSearchPanel">
+      <label className="chatSearchPanelLabel" htmlFor="chat-search-input">Search chats</label>
+      <div className="chatSearchPanelField">
+        <IconMagnifyingGlass />
+        <input
+          id="chat-search-input"
+          ref={inputRef}
+          className="chatSearchPanelInput"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search by title or message…"
+          autoComplete="off"
+          aria-label="Search chats"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') onClose?.()
+            if (e.key === 'Enter' && results[0]) {
+              onSelect(results[0].chat.id)
+              setQuery('')
+            }
+          }}
+        />
+      </div>
+      <p className="chatSearchPanelHint"><kbd>⌘</kbd><kbd>K</kbd> · <kbd>⌘</kbd><kbd>F</kbd> · <kbd>Esc</kbd> to close</p>
       {results.length > 0 && (
-        <div className="searchResults">
+        <div className="chatSearchPanelResults">
           {results.map((result, i) => (
-            <button key={`${result.chat.id}-${i}`} onClick={() => { onSelect(result.chat.id); setQuery('') }}>
-              <span>{result.chat.title}</span>
+            <button
+              type="button"
+              key={`${result.chat.id}-${i}`}
+              className="chatSearchPanelHit"
+              onClick={() => { onSelect(result.chat.id); setQuery('') }}
+            >
+              <span>{result.chat.title || 'Chat'}</span>
               <small>{result.preview}</small>
             </button>
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ChatSearchOverlay({ open, onClose, chats, onSelectChat }) {
+  useEffect(() => {
+    if (!open) return undefined
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div className="chatSearchOverlay" role="dialog" aria-modal="true" aria-label="Search chats">
+      <button type="button" className="chatSearchOverlayBackdrop" tabIndex={-1} aria-label="Close search" onClick={onClose} />
+      <div className="chatSearchOverlayCard">
+        <ChatSearchPanel
+          chats={chats}
+          autoFocus
+          onClose={onClose}
+          onSelect={(id) => {
+            onSelectChat(id)
+            onClose()
+          }}
+        />
+      </div>
     </div>
   )
 }
@@ -1125,61 +1545,6 @@ function TextControl({ label, value, onChange, placeholder }) {
   )
 }
 
-function LocalSearchStatus({ open }) {
-  const [status, setStatus] = useState(null)
-  const [starting, setStarting] = useState(false)
-
-  useEffect(() => {
-    if (!open || typeof adapter.searchStatus !== 'function') return
-    let cancelled = false
-    async function load() {
-      try {
-        const next = await adapter.searchStatus()
-        if (!cancelled) setStatus(next)
-      } catch {
-        if (!cancelled) setStatus({ ready: false, state: 'unavailable', message: 'Local search is unavailable.' })
-      }
-    }
-    load()
-    const timer = setInterval(load, 4000)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [open])
-
-  if (!open) return null
-  const state = status?.ready ? 'ready' : status?.state || 'checking'
-  const canStart = !status?.ready && status?.managed !== false && typeof adapter.startSearch === 'function'
-  const start = async () => {
-    if (starting) return
-    setStarting(true)
-    try {
-      setStatus(await adapter.startSearch())
-      const next = await adapter.searchStatus?.()
-      if (next) setStatus(next)
-    } catch {
-      setStatus({ ready: false, state: 'unavailable', message: 'Could not start local search.' })
-    } finally {
-      setStarting(false)
-    }
-  }
-
-  return (
-    <div className={`settingsSearchStatus is-${state}`}>
-      <div>
-        <strong>Local search: {state}</strong>
-        <span>{status?.message || 'Checking local SearXNG.'}</span>
-      </div>
-      {canStart && (
-        <button type="button" onClick={start} disabled={starting}>
-          {starting ? 'Starting' : 'Start'}
-        </button>
-      )}
-    </div>
-  )
-}
-
 function SettingsModelDownloads({ open }) {
   const [status, setStatus] = useState(null)
   const [busyKey, setBusyKey] = useState('')
@@ -1192,7 +1557,7 @@ function SettingsModelDownloads({ open }) {
         const next = await (adapter.mlxModelDownloadStatus?.() ?? adapter.mlxModelsStatus())
         if (!cancelled) setStatus(next)
       } catch {
-        if (!cancelled) setStatus({ status: 'unavailable', error: 'MLX runner is not ready.' })
+        if (!cancelled) setStatus({ status: 'unavailable', error: 'Backend offline.' })
       }
     }
     load()
@@ -1208,6 +1573,8 @@ function SettingsModelDownloads({ open }) {
   const downloading = status?.status === 'downloading' || status?.status === 'retrying'
   const pct = Math.max(0, Math.min(100, Number(status?.pct || 0)))
   const currentLabel = status?.currentModel || 'MLX model'
+  const downloadedBytes = (status?.models || []).reduce((sum, model) => sum + (model?.ready ? Number(model.sizeBytes ?? model.size ?? 0) : 0), 0)
+  const downloadedText = downloadedBytes ? `Downloaded: ${formatBytes(downloadedBytes)}` : ''
 
   if (!open || (!missingModels.length && !downloading && !status?.error)) return null
 
@@ -1229,6 +1596,7 @@ function SettingsModelDownloads({ open }) {
   return (
     <div className="settingsModelDownloads">
       <span className="settingsModelDownloadsTitle">Downloads</span>
+      {downloadedText && <small>{downloadedText}</small>}
       {status?.error && <small>{status.error}</small>}
       {downloading && (
         <div className="settingsDownloadProgress">
@@ -1271,6 +1639,9 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
   const modelResidency = useStore((s) => s.modelResidency)
   const setModelResidency = useStore((s) => s.setModelResidency)
   const modelOptions = models.map((model) => [model, model])
+  const [backendBusy, setBackendBusy] = useState(false)
+  const [backendStatus, setBackendStatus] = useState({ online: true, message: '' })
+  const setError = useStore((s) => s.setError)
 
   useEffect(() => {
     if (!open) setOpenSelect(null)
@@ -1309,6 +1680,25 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
     }
   }, [open, openSelect])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    async function pollBackend() {
+      try {
+        const result = await adapter.mlxPreflight?.()
+        if (!cancelled) setBackendStatus({ online: Boolean(result?.ok), message: result?.message || '' })
+      } catch (e) {
+        if (!cancelled) setBackendStatus({ online: false, message: e?.message || 'Backend offline.' })
+      }
+    }
+    pollBackend()
+    const t = window.setInterval(pollBackend, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(t)
+    }
+  }, [open])
+
   const handleUnloadModels = async () => {
     if (unloadState.loading) return
     setUnloadState({ loading: true, message: '' })
@@ -1330,13 +1720,37 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
     onClose: () => setOpenSelect(null),
   }
 
+  const startBackend = async () => {
+    if (backendBusy) return
+    setBackendBusy(true)
+    try {
+      await adapter.startMlxRunner?.()
+      const result = await adapter.mlxPreflight?.()
+      setBackendStatus({ online: Boolean(result?.ok), message: result?.message || '' })
+    } catch (e) {
+      setError(e?.message || 'Backend offline.')
+    } finally {
+      setBackendBusy(false)
+    }
+  }
+
+  const stopBackend = async () => {
+    if (backendBusy) return
+    setBackendBusy(true)
+    try {
+      await adapter.stopMlxRunner?.()
+      setBackendStatus({ online: false, message: 'Backend offline.' })
+    } catch (e) {
+      setError(e?.message || 'Stop failed.')
+    } finally {
+      setBackendBusy(false)
+    }
+  }
+
   return (
     <div className="settingsWrap" ref={wrapRef}>
       <button className="iconButton settingsButton" onClick={() => setOpen((v) => !v)} aria-label="Settings">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Z" />
-          <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.4-2.4 1a8.6 8.6 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.6A8.6 8.6 0 0 0 7 6.6l-2.4-1-2 3.4 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.4 2.4-1a8.6 8.6 0 0 0 2.6 1.5l.4 2.6h4l.4-2.6a8.6 8.6 0 0 0 2.6-1.5l2.4 1 2-3.4-2-1.5Z" />
-        </svg>
+        <IconSettingsSliders />
       </button>
       {renderPanel && (
         <section className={`settingsPanel ${closing ? 'isClosing' : ''}`}>
@@ -1346,6 +1760,14 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
           <TextControl label="Name" value={userName} onChange={(e) => setUserName(e.target.value)} placeholder="Your name" />
           <SelectControl id="model" label="Model" value={selectedModel} onChange={setSelectedModel} options={modelOptions} {...selectProps} open={openSelect === 'model'} />
           <SettingsModelDownloads open={open} />
+          <div className="settingsModelDownloads">
+            <span className="settingsModelDownloadsTitle">Backend</span>
+            <small>{backendStatus.online ? 'Online' : 'Offline'}{backendStatus.message ? ` · ${backendStatus.message}` : ''}</small>
+            <div className="downloadChoices">
+              <button type="button" onClick={startBackend} disabled={backendBusy || backendStatus.online}>Start</button>
+              <button type="button" onClick={stopBackend} disabled={backendBusy || !backendStatus.online}>Stop</button>
+            </div>
+          </div>
           <SelectControl id="context" label="Context" value={contextSize} onChange={(next) => setContextSize(Number(next))} options={CONTEXT_OPTIONS} {...selectProps} open={openSelect === 'context'} />
           <SelectControl id="residency" label="Residency" value={modelResidency} onChange={setModelResidency} options={RESIDENCY_OPTIONS} {...selectProps} open={openSelect === 'residency'} />
           <label className="checkRow">
@@ -1359,7 +1781,6 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
             <span>Allow web search</span>
           </label>
           <SelectControl id="searchStrategy" label="Search mode" value={searchStrategy} onChange={setSearchStrategy} options={SEARCH_STRATEGY_OPTIONS} {...selectProps} open={openSelect === 'searchStrategy'} />
-          <LocalSearchStatus open={open} />
           <button className="settingsActionButton" type="button" onClick={handleUnloadModels} disabled={unloadState.loading}>
             {unloadState.loading ? 'Unloading...' : 'Unload models'}
           </button>
@@ -1430,10 +1851,10 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
         ))}
         {active && isStreaming && (
           <section className="message assistant isStreaming">
-            {streamSearchStatus?.phase === 'searching' && !streamingContent
+            {(streamSearchStatus?.phase === 'searching' || streamSearchStatus?.phase === 'finding_weather') && !streamingContent
               ? <SearchingPlaceholder status={streamSearchStatus} />
               : <AssistantMessageBody message={{ createdAt: new Date().toISOString(), content: streamingContent || ' ' }} toolCards={streamToolCards} now={wallNow} content={streamingContent || ' '} />}
-            {!(streamSearchStatus?.phase === 'searching' && !streamingContent) && (
+            {!((streamSearchStatus?.phase === 'searching' || streamSearchStatus?.phase === 'finding_weather') && !streamingContent) && (
               <MessageMetrics metrics={streamMetrics} now={now} streaming />
             )}
           </section>
@@ -1465,7 +1886,7 @@ function ModelDownloadToast() {
         }
         return { next, runtime }
       } catch {
-        if (!cancelled) setStatus({ status: 'unavailable', error: 'MLX runner is not ready.' })
+        if (!cancelled) setStatus({ status: 'unavailable', error: 'Backend offline.' })
         return { next: { status: 'unavailable' }, runtime: preflight }
       }
     }
@@ -1501,6 +1922,8 @@ function ModelDownloadToast() {
   const statusText = runtimeBlocked
     ? preflight.message || 'MLX cannot see a Metal device from this process.'
     : status?.error || (downloading ? status?.step || 'Downloading model' : `Download this MLX model when you want it available.${missingText}`)
+
+  const mlxNotReady = /backend offline/i.test(String(status?.error || ''))
 
   const startDownload = async (modelKey) => {
     setBusy(true)
@@ -1540,10 +1963,62 @@ function ModelDownloadToast() {
         </div>
       )}
       <div className="downloadActions">
-        <button onClick={() => adapter.openMlxModelsFolder().catch(() => {})}>Open folder</button>
+        {mlxNotReady ? (
+          <button
+            onClick={() => {
+              setBusy(true)
+              adapter
+                .startMlxRunner?.()
+                .then(() => adapter.mlxModelsStatus?.().then((next) => setStatus(next)).catch(() => {}))
+                .catch(() => setStatus((current) => ({ ...(current || {}), status: 'unavailable', error: 'Could not start the backend MLX runner.' })))
+                .finally(() => setBusy(false))
+            }}
+            disabled={busy}
+          >
+            Start backend
+          </button>
+        ) : (
+          <button onClick={() => adapter.openMlxModelsFolder().catch(() => {})}>Open folder</button>
+        )}
         <button onClick={() => setDismissed(true)}>Dismiss</button>
       </div>
     </section>
+  )
+}
+
+function ErrorToast() {
+  const error = useStore((s) => s.error)
+  const setError = useStore((s) => s.setError)
+  const message = typeof error === 'string' ? error : (error?.message || '')
+  const open = Boolean(message && String(message).trim())
+
+  useEffect(() => {
+    if (!open) return
+    const t = window.setTimeout(() => setError(null), 5200)
+    return () => window.clearTimeout(t)
+  }, [open, setError])
+
+  if (!open) return null
+
+  return (
+    <div className="errorToast" role="status" aria-live="polite">
+      <span>{message}</span>
+      <button type="button" onClick={() => setError(null)} aria-label="Dismiss error">×</button>
+    </div>
+  )
+}
+
+function BackendOfflineToast({ backendPhase, onStart }) {
+  if (backendPhase === 'online') return null
+  const starting = backendPhase === 'starting'
+  return (
+    <div className="backendOfflineToast" role="status" aria-live="polite">
+      <div>
+        <strong>Backend offline</strong>
+        <span>Start the backend to send messages.</span>
+      </div>
+      <button type="button" onClick={onStart} disabled={starting}>{starting ? 'Starting…' : 'Start backend'}</button>
+    </div>
   )
 }
 
@@ -1551,6 +2026,7 @@ export default function App() {
   const theme = useStore((s) => s.theme)
   const colorMode = useStore((s) => s.colorMode)
   const userName = useStore((s) => s.userName).trim()
+  const setError = useStore((s) => s.setError)
   const {
     models, selectedModel, setSelectedModel,
     chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, streamSearchStatus, queuedMessages,
@@ -1561,12 +2037,14 @@ export default function App() {
   const removePendingAttachment = useStore((s) => s.removePendingAttachment)
   const messagesByChat = useStore((s) => s.messagesByChat)
   const hasLiveToolClock = useStore((s) => (
-    s.timers.some((timer) => timer.status === 'active') ||
+    s.timers.some((timer) => timer.status === 'active' || timer.status === 'paused') ||
     s.stopwatches.some((watch) => watch.running)
   ))
   const [now, setNow] = useState(() => performance.now())
   const [wallNow, setWallNow] = useState(() => Date.now())
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false)
+  const [chatSearchOpen, setChatSearchOpen] = useState(false)
+  const [backendPhase, setBackendPhase] = useState('online')
   const inputRef = useRef(null)
   const fileInputRef = useRef(null)
   const bootstrappedRef = useRef(false)
@@ -1575,20 +2053,73 @@ export default function App() {
     if (bootstrappedRef.current) return
     bootstrappedRef.current = true
     async function bootstrap() {
-      await loadModels()
-      const loaded = await loadChats()
-      const ordered = orderChats(loaded)
-      const reusable = [...ordered].reverse().find((chat) => {
-        const cachedMessages = useStore.getState().messagesByChat[chat.id]
-        const knownEmpty = chat.messageCount === 0 || cachedMessages?.length === 0
-        const looksUntitled = !chat.title || /^new chat$/i.test(chat.title)
-        return knownEmpty && looksUntitled
-      })
-      if (reusable) selectChat(reusable.id)
-      else newChat()
+      try {
+        await loadModels()
+        const loaded = await loadChats()
+        const ordered = orderChats(loaded)
+        const reusable = [...ordered].reverse().find((chat) => {
+          const cachedMessages = useStore.getState().messagesByChat[chat.id]
+          const knownEmpty = chat.messageCount === 0 || cachedMessages?.length === 0
+          const looksUntitled = !chat.title || /^new chat$/i.test(chat.title)
+          return knownEmpty && looksUntitled
+        })
+        if (reusable) selectChat(reusable.id)
+        else newChat()
+      } catch (error) {
+        setError(String(error?.message || error || 'Backend is offline.'))
+      }
     }
     bootstrap()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    async function poll() {
+      try {
+        const result = await adapter.mlxPreflight?.()
+        if (cancelled) return
+        setBackendPhase(Boolean(result?.ok) ? 'online' : 'offline')
+      } catch {
+        if (!cancelled) setBackendPhase('offline')
+      }
+    }
+    poll()
+    const t = window.setInterval(poll, 2500)
+    return () => {
+      cancelled = true
+      window.clearInterval(t)
+    }
+  }, [])
+
+  const startBackend = useCallback(async () => {
+    try {
+      setBackendPhase('starting')
+      await adapter.startMlxRunner?.()
+      const result = await adapter.mlxPreflight?.()
+      setBackendPhase(Boolean(result?.ok) ? 'online' : 'offline')
+      if (!result?.ok) setError(result?.message || 'Backend offline.')
+    } catch (e) {
+      setBackendPhase('offline')
+      setError(e?.message || 'Backend offline.')
+    }
+  }, [setError])
+
+  useEffect(() => {
+    const onUnhandledRejection = (event) => {
+      const msg = event?.reason?.message || String(event?.reason || '')
+      if (msg) setError(msg)
+    }
+    const onWindowError = (event) => {
+      const msg = event?.error?.message || event?.message
+      if (msg) setError(String(msg))
+    }
+    window.addEventListener('unhandledrejection', onUnhandledRejection)
+    window.addEventListener('error', onWindowError)
+    return () => {
+      window.removeEventListener('unhandledrejection', onUnhandledRejection)
+      window.removeEventListener('error', onWindowError)
+    }
+  }, [setError])
 
   useEffect(() => {
     if (!isStreaming) return
@@ -1615,6 +2146,17 @@ export default function App() {
     const onChange = (event) => setSystemDark(event.matches)
     media.addEventListener?.('change', onChange)
     return () => media.removeEventListener?.('change', onChange)
+  }, [])
+
+  useEffect(() => {
+    const onPaletteShortcut = (event) => {
+      if ((event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === 'k' || event.key.toLowerCase() === 'f')) {
+        event.preventDefault()
+        setChatSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onPaletteShortcut)
+    return () => window.removeEventListener('keydown', onPaletteShortcut)
   }, [])
 
   const orderedChats = useMemo(() => orderChats(chats), [chats])
@@ -1669,12 +2211,25 @@ export default function App() {
   return (
     <div className={`app theme-${theme} color-${resolvedColorMode}`}>
       <div className="themeFade" aria-hidden="true" />
+      <ErrorToast />
+      <div className="topRightHud">
+        <BackendOfflineToast backendPhase={backendPhase} onStart={startBackend} />
+        <LiveActivityDock />
+      </div>
       <header className="topBar">
-        <div className="topSearch">
-          <SearchBox chats={orderedChats} onSelect={selectChat} />
+        <div className="topBarInner">
+          <div className="topBarSpacer" aria-hidden="true" />
+          <button type="button" className="brandButton" onClick={() => openNewThread()}>naow</button>
+          <div className="topBarTools">
+            <button type="button" className="iconOnlyButton topBarToolButton" onClick={() => openNewThread(true)} aria-label="New chat" title="New chat">
+              <IconNewChatHeader />
+            </button>
+            <button type="button" className="iconOnlyButton topBarToolButton" onClick={() => setChatSearchOpen(true)} aria-label="Search chats" title="Search chats (⌘K)">
+              <IconMagnifyingGlass />
+            </button>
+            <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} onUnloadModels={unloadModels} />
+          </div>
         </div>
-        <button className="brandButton" onClick={() => openNewThread()}>naow</button>
-        <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} onUnloadModels={unloadModels} />
       </header>
       <ModelDownloadToast />
 
@@ -1696,9 +2251,6 @@ export default function App() {
             onEditUserMessage={editUserMessage}
           />
         </div>
-        <button className="newThreadButton" onClick={() => openNewThread()} aria-label="New thread">
-          <span>+</span>
-        </button>
       </main>
 
       <footer className="composer">
@@ -1772,8 +2324,14 @@ export default function App() {
             </button>
           </div>
         </div>
-        <BackendStats selectedModel={selectedModel} active={isStreaming} />
+        <BackendStats selectedModel={selectedModel} active={isStreaming} backendPhase={backendPhase} />
       </footer>
+      <ChatSearchOverlay
+        open={chatSearchOpen}
+        onClose={() => setChatSearchOpen(false)}
+        chats={orderedChats}
+        onSelectChat={selectChat}
+      />
     </div>
   )
 }

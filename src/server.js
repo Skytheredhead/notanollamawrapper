@@ -60,11 +60,14 @@ const sourceSummaryCache = new SourceSummaryCache({
   modelClient
 });
 
+// Expose sidecars to routes so the UI can (re)start them.
+
 const app = buildApp({
   config,
   db,
   ollama: modelClient,
   generationManager,
+  mlxSidecar,
   searchClient,
   preSearchManager,
   sourceSummaryCache

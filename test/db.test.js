@@ -51,6 +51,18 @@ test('database creates chats, stores messages, and lists summaries', () => {
   }
 });
 
+test('database can update chat title', () => {
+  const { db, cleanup } = tempDb();
+  try {
+    const chat = db.createChat({ title: 'New chat', model: 'm' });
+    assert.equal(db.updateChatTitle(chat.id, 'Renamed topic'), true);
+    assert.equal(db.getChat(chat.id).title, 'Renamed topic');
+    assert.equal(db.updateChatTitle(chat.id, ''), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test('database excludes replaced messages by default and includes them when requested', () => {
   const { db, cleanup } = tempDb();
   try {

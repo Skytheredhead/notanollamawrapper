@@ -101,6 +101,18 @@ const realAdapter = {
     return r.json()
   },
 
+  async startMlxRunner() {
+    const r = await fetch(`${BASE}/mlx/start`, { method: 'POST' })
+    if (!r.ok) throw new Error(`startMlxRunner: ${r.status}`)
+    return r.json()
+  },
+
+  async stopMlxRunner() {
+    const r = await fetch(`${BASE}/mlx/stop`, { method: 'POST' })
+    if (!r.ok) throw new Error(`stopMlxRunner: ${r.status}`)
+    return r.json()
+  },
+
   async startMlxModelDownload(modelKey) {
     const r = await fetch(`${BASE}/mlx/models/download`, {
       method: 'POST',
@@ -213,7 +225,13 @@ const realAdapter = {
   sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError, tools, onToolEvent, preSearchId = null, searchStrategy = 'normal') {
     const ctrl = new AbortController()
     ;(async () => {
-      try {
+      const isBackendOfflineError = (error) => {
+        const code = String(error?.code || '')
+        const message = String(error?.message || '')
+        return code === 'mlx_stream_failed' || /could not reach mlx runner/i.test(message)
+      }
+
+      const doRequest = async () => {
         let body
         let headers
         if (attachments?.length) {
@@ -237,14 +255,42 @@ const realAdapter = {
           signal: ctrl.signal,
         })
         if (!r.ok) throw new Error(`sendMessage: ${r.status}`)
-        for await (const chunk of readStream(r)) {
-          if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
-            onToolEvent?.(chunk)
+        return r
+      }
+
+      try {
+        let attemptedAutoStart = false
+        while (true) {
+          const r = await doRequest()
+          let shouldRetry = false
+          for await (const chunk of readStream(r)) {
+            if (chunk.error) {
+              if (!attemptedAutoStart && isBackendOfflineError(chunk.error) && typeof realAdapter.startMlxRunner === 'function') {
+                attemptedAutoStart = true
+                try {
+                  await realAdapter.startMlxRunner()
+                  shouldRetry = true
+                } catch (e) {
+                  throw new Error(e?.message || 'Backend offline.')
+                }
+                break
+              }
+              throw new Error(chunk.error.message || 'Generation failed')
+            }
+            if (
+              chunk.event === 'generation_start' ||
+              chunk.event?.startsWith('tool_call') ||
+              chunk.event === 'client_tool_action' ||
+              chunk.event === 'web_search' ||
+              chunk.event === 'search_status'
+            ) {
+              onToolEvent?.(chunk)
+            }
+            const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
+            if (tok) onToken(tok)
+            if (chunk.done || chunk.event === 'message_complete') { onDone(chunk); return }
           }
-          const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
-          if (tok) onToken(tok)
-          if (chunk.done || chunk.event === 'message_complete') { onDone(chunk); return }
+          if (!shouldRetry) break
         }
         onDone({})
       } catch (e) {
@@ -278,7 +324,13 @@ const realAdapter = {
         if (!r.ok) throw new Error(`regenerate: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
+          if (
+            chunk.event === 'generation_start' ||
+            chunk.event?.startsWith('tool_call') ||
+            chunk.event === 'client_tool_action' ||
+            chunk.event === 'web_search' ||
+            chunk.event === 'search_status'
+          ) {
             onToolEvent?.(chunk)
           }
           const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
@@ -314,7 +366,13 @@ const realAdapter = {
         if (!r.ok) throw new Error(`editMessage: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
+          if (
+            chunk.event === 'generation_start' ||
+            chunk.event?.startsWith('tool_call') ||
+            chunk.event === 'client_tool_action' ||
+            chunk.event === 'web_search' ||
+            chunk.event === 'search_status'
+          ) {
             onToolEvent?.(chunk)
           }
           const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''

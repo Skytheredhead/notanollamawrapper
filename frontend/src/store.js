@@ -104,11 +104,39 @@ const useStore = create(
           if (action.action === 'timer_cancel') {
             return { timers: s.timers.map((timer) => timer.id === action.id ? { ...timer, status: 'cancelled' } : timer) }
           }
+          if (action.action === 'timer_pause') {
+            return {
+              timers: s.timers.map((timer) => {
+                if (timer.id !== action.id || timer.status !== 'active') return timer
+                const pausedRemainingMs = Math.max(0, timer.targetAt - now)
+                return { ...timer, status: 'paused', pausedRemainingMs }
+              }),
+            }
+          }
+          if (action.action === 'timer_resume') {
+            return {
+              timers: s.timers.map((timer) => {
+                if (timer.id !== action.id || timer.status !== 'paused') return timer
+                const rem = Math.max(1000, timer.pausedRemainingMs || 0)
+                return {
+                  ...timer,
+                  status: 'active',
+                  targetAt: now + rem,
+                  pausedRemainingMs: undefined,
+                }
+              }),
+            }
+          }
           if (action.action === 'timer_adjust') {
             const deltaMs = Number(action.deltaMs || 0)
             return {
               timers: s.timers.map((timer) => {
-                if (timer.id !== action.id || timer.status !== 'active') return timer
+                if (timer.id !== action.id) return timer
+                if (timer.status === 'paused') {
+                  const next = Math.max(1000, (timer.pausedRemainingMs || 0) + deltaMs)
+                  return { ...timer, pausedRemainingMs: next }
+                }
+                if (timer.status !== 'active') return timer
                 const targetAt = Math.max(now + 1000, timer.targetAt + deltaMs)
                 return {
                   ...timer,

@@ -94,31 +94,29 @@ function displayForClientAction(name, action = {}) {
     };
   }
   if (name === 'timer_cancel') {
-    return { title: 'Timer', summary: 'Cancelled', rows: compactRows([{ label: 'ID', value: action.id }]) };
+    return { title: 'Timer', summary: 'Cancelled' };
   }
   if (name === 'timer_adjust') {
     const deltaMs = Number(action.deltaMs || 0);
     return {
       title: 'Timer',
-      summary: `${deltaMs >= 0 ? 'Added' : 'Removed'} ${Math.round(Math.abs(deltaMs) / 1000)}s`,
-      rows: compactRows([{ label: 'ID', value: action.id }])
+      summary: `${deltaMs >= 0 ? 'Added' : 'Removed'} ${Math.round(Math.abs(deltaMs) / 1000)}s`
     };
   }
   if (name === 'timer_set') {
     return {
       title: 'Timer',
-      summary: `Set to ${Math.round(Number(action.durationMs || 0) / 1000)}s`,
-      rows: compactRows([{ label: 'ID', value: action.id }])
+      summary: `Set to ${Math.round(Number(action.durationMs || 0) / 1000)}s`
     };
   }
   if (name === 'stopwatch_start') {
     return { title: 'Stopwatch', summary: label };
   }
   if (name === 'stopwatch_stop') {
-    return { title: 'Stopwatch', summary: 'Stopped', rows: compactRows([{ label: 'ID', value: action.id }]) };
+    return { title: 'Stopwatch', summary: 'Stopped' };
   }
   if (name === 'stopwatch_reset') {
-    return { title: 'Stopwatch', summary: 'Reset', rows: compactRows([{ label: 'ID', value: action.id }]) };
+    return { title: 'Stopwatch', summary: 'Reset' };
   }
   return { title: labelForTool(name), summary: action.action || 'Updated' };
 }
@@ -141,6 +139,8 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
 
   if (name === 'get_weather') {
     const current = result.current || {};
+    const forecast = Array.isArray(result.forecast) ? result.forecast : [];
+    const hourly = Array.isArray(result.hourly) ? result.hourly : [];
     return {
       title: result.location || 'Weather',
       summary: truncateOneLine(`${current.summary || 'Current weather'} · ${formatValue(current.temperatureF)}F`),
@@ -149,11 +149,36 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
         { label: 'Humidity', value: `${formatValue(current.humidityPercent)}%` },
         { label: 'Wind', value: `${formatValue(current.windMph)} mph` },
         { label: 'Precip', value: `${formatValue(current.precipitationIn)} in` },
-        ...((result.forecast || []).slice(0, 3).map((day) => ({
+        ...(forecast.slice(0, 3).map((day) => ({
           label: day.date,
           value: `${day.summary || 'Forecast'}, high ${formatValue(day.highF)}F, low ${formatValue(day.lowF)}F`
         })))
-      ])
+      ]),
+      weather: {
+        location: result.location || 'Weather',
+        timezone: result.timezone || '',
+        current: {
+          summary: current.summary || 'Current weather',
+          temperatureF: current.temperatureF,
+          feelsLikeF: current.feelsLikeF,
+          humidityPercent: current.humidityPercent,
+          windMph: current.windMph,
+          precipitationIn: current.precipitationIn,
+          weatherCode: current.weatherCode
+        },
+        daily: forecast.slice(0, 10).map((day) => ({
+          date: day.date,
+          summary: day.summary,
+          highF: day.highF,
+          lowF: day.lowF,
+          weatherCode: day.weatherCode
+        })),
+        hourly: hourly.slice(0, 48).map((h) => ({
+          time: h.time,
+          temperatureF: h.temperatureF,
+          weatherCode: h.weatherCode
+        }))
+      }
     };
   }
 
@@ -713,7 +738,14 @@ export function createToolRuntime(config, ollama, searchClientOrFetch = null, fe
 async function executeBuiltIn(name, args, runtime, { signal } = {}) {
   if (name === 'get_weather') {
     const result = await runtime.weatherClient.forecast({ location: args.location, days: args.days, signal });
-    return { name, result, text: formatWeather(result), cacheHit: Boolean(result.cacheHit), source: 'Open-Meteo' };
+    return {
+      name,
+      result,
+      text: formatWeather(result),
+      cacheHit: Boolean(result.cacheHit),
+      source: 'Open-Meteo',
+      direct: true
+    };
   }
   if (name === 'web_search') {
     const search = runtime.searchClient
@@ -868,6 +900,10 @@ function looksLikeWeatherLocation(query) {
   if (/^(yes|yeah|yep|no|nah|use the tool|check it|do it|that one)$/i.test(text)) return false;
   if (/[{}[\]<>]|https?:\/\//i.test(text)) return false;
   if (/\b(weather|forecast|temperature|rain|snow|wind|tool|hallucinated)\b/i.test(text)) return false;
+  if (/\b(stopwatch|timer|calculator|alarm|remind|uuid|password|hash|base64)\b/i.test(text)) return false;
+  if (/\b(start|stop|reset|begin)\b.*\b(stopwatch|timer)\b|\b(stopwatch|timer)\b.*\b(start|stop|reset)\b/i.test(text)) {
+    return false;
+  }
   if (/\d+\s*[-+*/%^]\s*\d+/.test(text)) return false;
   return /[a-z]/i.test(text) && (
     /,/.test(text) ||
@@ -910,7 +946,7 @@ function latestStopwatch(state = {}, { running = null } = {}) {
   )) || null;
 }
 
-function fastToolCandidate(query, { messages = [], state = {} } = {}) {
+export function fastToolCandidate(query, { messages = [], state = {} } = {}) {
   const text = String(query || '').trim();
   const lower = text.toLowerCase();
   if (/\b(weather|forecast|temperature|rain|snow|wind)\b/.test(lower)) {
@@ -918,8 +954,6 @@ function fastToolCandidate(query, { messages = [], state = {} } = {}) {
     if (!location) return { name: 'get_weather', args: {}, missing: 'location', directText: 'What location should I check the weather for?' };
     return { name: 'get_weather', args: { location, days: /\bweek\b/.test(lower) ? 7 : 3 } };
   }
-  const weatherLocation = weatherFollowupLocation(text, messages);
-  if (weatherLocation) return { name: 'get_weather', args: { location: weatherLocation, days: 3 } };
   if (/\b(open|show|bring up|launch)\b.{0,24}\bcalculator\b|\bcalculator\b.{0,24}\b(open|show|launch)\b/.test(lower)) {
     return { name: 'calculate', args: { expression: '0' } };
   }
@@ -950,6 +984,8 @@ function fastToolCandidate(query, { messages = [], state = {} } = {}) {
     if (watch?.id) return { name: 'stopwatch_reset', args: { id: watch.id } };
   }
   if (/\b(stopwatch)\b.*\b(start|begin)\b|\b(start|begin)\b.*\bstopwatch\b/.test(lower)) return { name: 'stopwatch_start', args: { label: 'Stopwatch' } };
+  const weatherLocation = weatherFollowupLocation(text, messages);
+  if (weatherLocation) return { name: 'get_weather', args: { location: weatherLocation, days: 3 } };
   if (/\buuid\b/.test(lower)) return { name: 'uuid_generate', args: { count: Number(lower.match(/\b(\d+)\b/)?.[1] || 1) } };
   if (/\bpassword\b/.test(lower) && /\b(generate|make|create)\b/.test(lower)) return { name: 'password_generate', args: { length: Number(lower.match(/\b(\d{2,3})\b/)?.[1] || 20) } };
   const conversion = extractConversion(text);

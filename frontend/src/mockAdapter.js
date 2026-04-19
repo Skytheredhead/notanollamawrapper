@@ -70,6 +70,8 @@ const mockAdapter = {
   },
 
   async mlxPreflight() { return { ok: true, message: 'MLX mock ready.' } },
+  async startMlxRunner() { return { started: true } },
+  async stopMlxRunner() { return { stopped: true } },
   async startMlxModelDownload() { return this.mlxModelsStatus() },
   async mlxModelDownloadStatus() { return this.mlxModelsStatus() },
   async openMlxModelsFolder() { return { opened: true, path: 'mock' } },

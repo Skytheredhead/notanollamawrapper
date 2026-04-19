@@ -87,6 +87,19 @@ test('weather fast path treats a location-only reply as the requested weather lo
   assert.match(result.text, /52F/);
 });
 
+test('stopwatch start is not treated as a weather follow-up location', async () => {
+  const runtime = createToolRuntime(config, { webSearch: async () => ({ results: [] }) });
+  const toolsOptions = toolOptionsFromBody({}, { webSearch: false });
+  const result = await runFastTool('start a stopwatch', runtime, {
+    toolsOptions,
+    messages: [
+      { role: 'user', content: 'whats the weather in sammamish' },
+      { role: 'assistant', content: 'Here is the forecast.' }
+    ]
+  });
+  assert.equal(result.name, 'stopwatch_start');
+});
+
 test('unit conversion handles common units', async () => {
   const runtime = createToolRuntime(config, { webSearch: async () => ({ results: [] }) });
   const result = await executeTool('convert_units', { value: 1, from: 'mile', to: 'km' }, runtime);

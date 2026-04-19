@@ -96,6 +96,8 @@ export class GenerationManager {
     for (const entry of entries) {
       this.stopEntry(entry, reason);
     }
+    this.byGenerationId.clear();
+    this.byChatId.clear();
     return entries;
   }
 }

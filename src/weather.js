@@ -174,6 +174,7 @@ export class WeatherClient {
         'precipitation_sum',
         'wind_speed_10m_max'
       ].join(','));
+      url.searchParams.set('hourly', ['temperature_2m', 'weather_code'].join(','));
       url.searchParams.set('forecast_days', String(forecastDays));
       url.searchParams.set('temperature_unit', 'fahrenheit');
       url.searchParams.set('wind_speed_unit', 'mph');
@@ -183,6 +184,15 @@ export class WeatherClient {
       const payload = await this.fetchJson(url, { signal });
       const current = payload.current || {};
       const daily = payload.daily || {};
+      const hourly = payload.hourly || {};
+      const hourlyTimes = hourly.time || [];
+      const hourlyTemps = hourly.temperature_2m || [];
+      const hourlyCodes = hourly.weather_code || [];
+      const hourlySeries = hourlyTimes.slice(0, 48).map((time, index) => ({
+        time,
+        temperatureF: hourlyTemps[index],
+        weatherCode: hourlyCodes[index]
+      }));
       const result = {
         source: 'Open-Meteo',
         location: [place.name, place.admin1, place.country].filter(Boolean).join(', '),
@@ -197,10 +207,12 @@ export class WeatherClient {
           precipitationIn: current.precipitation,
           windMph: current.wind_speed_10m,
           gustMph: current.wind_gusts_10m,
+          weatherCode: current.weather_code,
           summary: weatherCodeSummary(current.weather_code)
         },
         forecast: (daily.time || []).map((time, index) => ({
           date: time,
+          weatherCode: daily.weather_code?.[index],
           summary: weatherCodeSummary(daily.weather_code?.[index]),
           highF: daily.temperature_2m_max?.[index],
           lowF: daily.temperature_2m_min?.[index],
@@ -208,6 +220,7 @@ export class WeatherClient {
           precipitationIn: daily.precipitation_sum?.[index],
           maxWindMph: daily.wind_speed_10m_max?.[index]
         })),
+        hourly: hourlySeries,
         cacheHit: false
       };
       return cacheSet(this.weatherCache, cacheKey, result, 5 * 60 * 1000);

@@ -367,6 +367,9 @@ export class LocalDatabase {
         SELECT * FROM message_attachments
         WHERE message_id = ?
         ORDER BY created_at ASC, id ASC
+      `),
+      updateChatTitle: this.db.prepare(`
+        UPDATE chats SET title = @title, updated_at = @updatedAt WHERE id = @id
       `)
     };
   }
@@ -410,6 +413,17 @@ export class LocalDatabase {
   setChatModelIfEmpty(chatId, model) {
     if (!model) return;
     this.statements.setChatModelIfEmpty.run(model, this.now(), chatId);
+  }
+
+  updateChatTitle(chatId, title) {
+    const value = String(title || '').trim();
+    if (!value) return false;
+    const result = this.statements.updateChatTitle.run({
+      id: chatId,
+      title: value.slice(0, 200),
+      updatedAt: this.now()
+    });
+    return result.changes > 0;
   }
 
   listChats({ limit = 50, cursor = null } = {}) {
