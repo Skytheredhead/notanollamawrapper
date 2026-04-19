@@ -106,4 +106,11 @@ export class SourceSummaryCache {
     }
     return { sources: items };
   }
+
+  /** Yields each summarized source in order (for NDJSON streaming to the client). */
+  async *summarizeSequence(sources = [], { signal } = {}) {
+    for (const source of sources.slice(0, 10)) {
+      yield await this.summarizeOne(source, signal);
+    }
+  }
 }

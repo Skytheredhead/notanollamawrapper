@@ -57,18 +57,36 @@ test('submitted search classifier skips non-searchy prompts before calling 0.6B'
   assert.equal(result.skipped, 'heuristic_not_needed');
 });
 
-test('submitted search classifier uses compact 0.6B calls for search-worthy prompts', async () => {
-  let receivedOptions = null;
+test('submitted search classifier rewrites search-worthy prompts with 0.6B into real queries', async () => {
+  let modelCalled = false;
   const manager = makeManager({
-    async completeChat({ options }) {
-      receivedOptions = options;
-      return { message: { content: '{"shouldSearch":true,"confidence":0.94,"queries":["qwen latest release"]}' } };
+    async completeChat() {
+      modelCalled = true;
+      return { message: { content: '{"queries":["qwen latest release"]}' } };
     }
   });
 
-  const result = await manager.classifySubmitted('what is the latest qwen release today?');
+  const draft = 'what is the latest qwen release today?';
+  const result = await manager.classifySubmitted(draft);
 
+  assert.equal(modelCalled, true);
   assert.equal(result.shouldSearch, true);
   assert.deepEqual(result.queries, ['qwen latest release']);
-  assert.equal(receivedOptions.max_tokens, 64);
+});
+
+test('submitted search classifier treats explicit google requests as search', async () => {
+  let modelCalled = false;
+  const manager = makeManager({
+    async completeChat() {
+      modelCalled = true;
+      return { message: { content: '{"shouldSearch":false,"confidence":1,"queries":[]}' } };
+    }
+  });
+
+  const result = await manager.classifySubmitted('can you google please');
+
+  assert.equal(modelCalled, false);
+  assert.equal(result.shouldSearch, true);
+  assert.equal(result.confidence, 1);
+  assert.equal(result.explicitSearch, true);
 });

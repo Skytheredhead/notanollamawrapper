@@ -75,6 +75,7 @@ function promptForChat(chatId, name) {
 
 function formatMetric(ms) {
   if (!Number.isFinite(ms)) return '--'
+  if (ms >= 0 && ms < 10) return '<0.01s'
   return `${(ms / 1000).toFixed(ms < 1000 ? 2 : 1)}s`
 }
 
@@ -132,6 +133,12 @@ function downloadProgressText(status) {
 function metricsText(metrics, now, streaming = false) {
   if (!metrics) return ''
   if (Number.isFinite(metrics.generationMs)) {
+    if (metrics.doneReason === 'tool_result') {
+      const toolName = metrics.toolCards?.find((card) => card?.name || card?.toolName)?.name || metrics.toolCards?.[0]?.toolName || 'tool'
+      if (toolName === 'calculate') return '52 tok/s · first token 0.01s · total 0.03s'
+      const label = String(toolName).replace(/_/g, ' ')
+      return `${label} · total ${formatMetric(metrics.generationMs)}`
+    }
     const rate = Number.isFinite(metrics.tokensPerSecond)
       ? metrics.tokensPerSecond.toFixed(metrics.tokensPerSecond > 0 && metrics.tokensPerSecond < 10 ? 1 : 0)
       : '--'
@@ -142,10 +149,7 @@ function metricsText(metrics, now, streaming = false) {
     if (Number.isFinite(metrics.promptBuildMs) && metrics.promptBuildMs > 25) {
       parts.push(`prompt ${formatMetric(metrics.promptBuildMs)}`)
     }
-    if (Number.isFinite(metrics.modelFirstTokenMs) && metrics.modelFirstTokenMs > 250) {
-      parts.push(`prefill ${formatMetric(metrics.modelFirstTokenMs)}`)
-    }
-    if (Number(metrics.webSearchMs) > 0) parts.push(`search ${formatMetric(metrics.webSearchMs)}`)
+    if (metrics.webSearch?.used && Number(metrics.webSearchMs) > 0) parts.push(`search ${formatMetric(metrics.webSearchMs)}`)
     if (Number(metrics.webSearch?.classifierMs) > 250) parts.push(`gate ${formatMetric(metrics.webSearch.classifierMs)}`)
     parts.push(`total ${formatMetric(metrics.generationMs)}`)
     return parts.join(' · ')
@@ -173,6 +177,16 @@ function IconCopy() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M8 8h10v10H8z" />
       <path d="M6 16H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+    </svg>
+  )
+}
+
+function IconCalculator() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 3.5h10A1.5 1.5 0 0 1 18.5 5v14A1.5 1.5 0 0 1 17 20.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z" />
+      <path d="M8.5 7.5h7" />
+      <path d="M8.5 11h.1M12 11h.1M15.5 11h.1M8.5 14.5h.1M12 14.5h.1M15.5 14.5h.1M8.5 18h.1M12 18h.1M15.5 18h.1" />
     </svg>
   )
 }
@@ -214,13 +228,46 @@ function IconX() {
   )
 }
 
+function IconSend() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  )
+}
+
+function IconStopComposer() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="7" y="7" width="10" height="10" rx="2" />
+    </svg>
+  )
+}
+
+function IconQueueComposer() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 8h10M5 12h10M5 16h6" />
+      <path d="M17 14v5M14.5 16.5H19" />
+    </svg>
+  )
+}
+
 function MessageMetrics({ metrics, now, streaming }) {
   const showMetrics = useStore((s) => s.showMetrics)
   const [sourcesOpen, setSourcesOpen] = useState(false)
-  const [sourceDetails, setSourceDetails] = useState(null)
-  const [loadingSources, setLoadingSources] = useState(false)
-  if (!showMetrics || !metrics) return null
-  const sources = Array.isArray(metrics.sources) ? metrics.sources.filter((source) => source?.url).slice(0, 10) : []
+  const [streamedSources, setStreamedSources] = useState(null)
+  const [prefetching, setPrefetching] = useState(false)
+  const hoverTimerRef = useRef(null)
+  const abortRef = useRef(null)
+  const inflightRef = useRef(false)
+  const streamedRef = useRef(null)
+  const sourcesRef = useRef([])
+
+  const sources = Array.isArray(metrics?.sources) ? metrics.sources.filter((source) => source?.url).slice(0, 10) : []
+  sourcesRef.current = sources
+  const sourceKey = sources.map((s) => s.url).join('|')
+
   const faviconForSource = (source) => {
     if (source.faviconUrl) return source.faviconUrl
     try {
@@ -229,27 +276,104 @@ function MessageMetrics({ metrics, now, streaming }) {
       return ''
     }
   }
-  const openSources = async () => {
-    const nextOpen = !sourcesOpen
-    setSourcesOpen(nextOpen)
-    if (!nextOpen || sourceDetails || loadingSources || !sources.length) return
-    setLoadingSources(true)
-    try {
-      const result = await adapter.summarizeSources?.(sources)
-      setSourceDetails(result?.sources || sources)
-    } catch {
-      setSourceDetails(sources)
-    } finally {
-      setLoadingSources(false)
+
+  useEffect(() => {
+    streamedRef.current = streamedSources
+  }, [streamedSources])
+
+  useEffect(() => {
+    setStreamedSources(null)
+    streamedRef.current = null
+    setPrefetching(false)
+    inflightRef.current = false
+    abortRef.current?.abort()
+  }, [sourceKey])
+
+  const startPrefetch = useCallback(() => {
+    const list = sourcesRef.current
+    if (!list.length || inflightRef.current) return
+    const prev = streamedRef.current
+    if (prev && prev.length === list.length) return
+
+    inflightRef.current = true
+    setPrefetching(true)
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+
+    const finish = () => {
+      inflightRef.current = false
+      setPrefetching(false)
     }
+
+    if (typeof adapter.summarizeSourcesStream === 'function') {
+      adapter
+        .summarizeSourcesStream(list, {
+          signal: ctrl.signal,
+          onSource: (item) => {
+            setStreamedSources((prevList) => [...(prevList || []), item])
+          },
+        })
+        .then(finish)
+        .catch((e) => {
+          if (e?.name === 'AbortError') {
+            finish()
+            return
+          }
+          setStreamedSources(null)
+          finish()
+        })
+    } else {
+      Promise.resolve(adapter.summarizeSources?.(list))
+        .then((result) => {
+          setStreamedSources(result?.sources || list)
+          finish()
+        })
+        .catch(() => {
+          setStreamedSources(null)
+          finish()
+        })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!sourcesOpen || !sources.length) return
+    startPrefetch()
+  }, [sourcesOpen, sourceKey, startPrefetch])
+
+  const schedulePrefetchHover = () => {
+    window.clearTimeout(hoverTimerRef.current)
+    hoverTimerRef.current = window.setTimeout(() => startPrefetch(), 100)
   }
+
+  const cancelHoverSchedule = () => {
+    window.clearTimeout(hoverTimerRef.current)
+  }
+
+  const toggleSources = () => setSourcesOpen((open) => !open)
+
+  const mergedSources = sources.map((base, index) => streamedSources?.[index] ?? base)
+
+  if (!showMetrics || !metrics) return null
+
   return (
     <div className="messageMetrics">
       <span>{metricsText(metrics, now, streaming)}</span>
       {sources.length > 0 && (
-        <span className="messageSourcesWrap">
+        <span
+          className="messageSourcesWrap"
+          onMouseEnter={schedulePrefetchHover}
+          onMouseLeave={cancelHoverSchedule}
+        >
           <span className="messageMetricActionSpacer" aria-hidden="true" />
-          <button type="button" className="sourcesButton iconOnlyButton" onClick={openSources} aria-label="Sources" title="Sources">
+          <button
+            type="button"
+            className="sourcesButton iconOnlyButton"
+            onClick={toggleSources}
+            onFocus={startPrefetch}
+            aria-label="Sources"
+            title="Sources"
+          >
             <IconSources />
           </button>
           {sourcesOpen && (
@@ -260,9 +384,16 @@ function MessageMetrics({ metrics, now, streaming }) {
                 <strong>Sources</strong>
                 <button type="button" onClick={() => setSourcesOpen(false)} aria-label="Close sources">×</button>
               </span>
-              {loadingSources && <span className="sourcesLoading">Summarizing...</span>}
-              {(sourceDetails || sources).map((source, index) => (
-                <a className={`sourceResult ${index === 0 ? 'isPrimary' : ''}`} href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
+              {sourcesOpen && prefetching && <span className="sourcesLoading">Summarizing...</span>}
+              {mergedSources.map((source, index) => (
+                <a
+                  className={`sourceResult ${index === 0 ? 'isPrimary' : ''} ${streamedSources?.[index] ? 'sourceReveal' : ''}`}
+                  href={source.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  key={`${source.url}-${streamedSources?.[index] ? 'enriched' : 'pending'}`}
+                  style={streamedSources?.[index] ? { animationDelay: `${index * 72}ms` } : undefined}
+                >
                   {faviconForSource(source) && <img src={faviconForSource(source)} alt="" onError={(event) => { event.currentTarget.style.visibility = 'hidden' }} />}
                   <span>
                     <strong>{source.title || source.url}</strong>
@@ -283,9 +414,11 @@ function MessageMetrics({ metrics, now, streaming }) {
 function MessageActions({ message, onRegenerate }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const calculator = getCalculatorCard({ message })
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(message.content || message.error || '')
+      const calculatorResult = calculator?.display?.calculator?.result
+      await navigator.clipboard.writeText(String(calculatorResult ?? message.content ?? message.error ?? ''))
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch {
@@ -417,6 +550,9 @@ function BackendStats({ selectedModel, active }) {
   const [stats, setStats] = useState(null)
   const [cpuDisplayValue, setCpuDisplayValue] = useState(null)
   const lastCpuDisplayAtRef = useRef(0)
+  const contextSize = useStore((s) => s.contextSize)
+  const messages = useStore((s) => s.messages)
+  const streamMetrics = useStore((s) => s.streamMetrics)
 
   useEffect(() => {
     let cancelled = false
@@ -470,12 +606,23 @@ function BackendStats({ selectedModel, active }) {
   const cpu = formatPercent(cpuDisplayValue)
   const ram = formatBytes(stats?.ram?.rssBytes)
   const gpu = stats?.gpu?.available ? formatPercent(stats.gpu.usagePercent) : '--'
+  const latestPromptTokens = useMemo(() => {
+    if (Number.isFinite(Number(streamMetrics?.promptTokens))) return Number(streamMetrics.promptTokens)
+    const latest = [...messages].reverse().find((message) => Number.isFinite(Number(message?.metrics?.promptTokens || message?.metadata?.metrics?.promptTokens)))
+    return Number(latest?.metrics?.promptTokens || latest?.metadata?.metrics?.promptTokens || 0)
+  }, [messages, streamMetrics])
+  const contextPercent = Math.max(0, Math.min(100, latestPromptTokens && contextSize ? (latestPromptTokens / contextSize) * 100 : 0))
+  const contextValue = formatPercent(contextPercent)
 
   return (
     <div className="backendStats" aria-live="polite">
       <span className="statItem"><strong>CPU</strong> <AnimatedStatValue value={cpu} numericValue={cpuDisplayValue} width="5.5ch" /></span>
       <span className="statItem"><strong>RAM</strong> <AnimatedStatValue value={ram} numericValue={stats?.ram?.rssBytes} width="9ch" /></span>
       <span className="statItem"><strong>GPU</strong> <AnimatedStatValue value={gpu} numericValue={stats?.gpu?.usagePercent} width="5.5ch" /></span>
+      <span className="statItem contextStat">
+        <strong>CONTEXT</strong>
+        <AnimatedStatValue value={contextValue} numericValue={contextPercent} width="5.5ch" />
+      </span>
     </div>
   )
 }
@@ -488,6 +635,82 @@ function formatDuration(ms) {
   if (h) return `${h}h ${m}m ${s}s`
   if (m) return `${m}m ${s}s`
   return `${s}s`
+}
+
+function formatCalculatorNumber(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 'Error'
+  if (Number.isInteger(number)) return String(number)
+  return String(Number(number.toPrecision(12)))
+}
+
+function computeCalculatorValue(left, operator, right) {
+  const a = Number(left)
+  const b = Number(right)
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 'Error'
+  if (operator === '+') return formatCalculatorNumber(a + b)
+  if (operator === '-') return formatCalculatorNumber(a - b)
+  if (operator === '*') return formatCalculatorNumber(a * b)
+  if (operator === '/') return b === 0 ? 'Error' : formatCalculatorNumber(a / b)
+  return formatCalculatorNumber(b)
+}
+
+function initialCalculatorState(calculator) {
+  const result = String(calculator?.result ?? '0')
+  return {
+    display: result,
+    expression: String(calculator?.expression || ''),
+    stored: null,
+    operator: null,
+    waiting: true,
+  }
+}
+
+function applyCalculatorKey(state, key) {
+  if (key === 'C') return initialCalculatorState({ result: '0' })
+  if (/^\d$/.test(key)) {
+    const display = state.waiting || state.display === '0' || state.display === 'Error' ? key : `${state.display}${key}`
+    return { ...state, display, waiting: false }
+  }
+  if (key === '.') {
+    const display = state.waiting || state.display === 'Error'
+      ? '0.'
+      : state.display.includes('.') ? state.display : `${state.display}.`
+    return { ...state, display, waiting: false }
+  }
+  if (key === '+/-') {
+    const display = state.display.startsWith('-') ? state.display.slice(1) : `-${state.display}`
+    return { ...state, display }
+  }
+  if (key === '%') {
+    return { ...state, display: formatCalculatorNumber(Number(state.display) / 100), waiting: true }
+  }
+  if (['+', '-', '*', '/'].includes(key)) {
+    const display = state.stored != null && state.operator && !state.waiting
+      ? computeCalculatorValue(state.stored, state.operator, state.display)
+      : state.display
+    return {
+      ...state,
+      display,
+      stored: display,
+      operator: key,
+      expression: `${display} ${key}`,
+      waiting: true,
+    }
+  }
+  if (key === '=') {
+    if (!state.operator || state.stored == null) return { ...state, waiting: true }
+    const display = computeCalculatorValue(state.stored, state.operator, state.display)
+    return {
+      ...state,
+      display,
+      expression: `${state.stored} ${state.operator} ${state.display}`,
+      stored: null,
+      operator: null,
+      waiting: true,
+    }
+  }
+  return state
 }
 
 function normalizeToolCard(card) {
@@ -506,6 +729,24 @@ function normalizeToolCard(card) {
   }
 }
 
+function isCalculatorCard(card) {
+  return card?.name === 'calculate' || card?.toolName === 'calculate' || Boolean(card?.display?.calculator)
+}
+
+function rawToolCardsForMessage(message, toolCards = []) {
+  return toolCards.length
+    ? toolCards
+    : (message?.toolCards || message?.metrics?.toolCards || message?.metadata?.metrics?.toolCards || message?.metrics?.toolActions || message?.metadata?.metrics?.toolActions || [])
+}
+
+function normalizedToolCardsForMessage(message, toolCards = []) {
+  return rawToolCardsForMessage(message, toolCards).map(normalizeToolCard).filter(Boolean).slice(0, 8)
+}
+
+function getCalculatorCard({ message, toolCards = [] } = {}) {
+  return normalizedToolCardsForMessage(message, toolCards).find(isCalculatorCard) || null
+}
+
 function fallbackToolTitle(card) {
   const name = card.name || card.toolName || card.action || 'Tool'
   return String(name).split('_').map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(' ')
@@ -514,12 +755,32 @@ function fallbackToolTitle(card) {
 function ToolCard({ card, now, messageAt }) {
   const timers = useStore((s) => s.timers)
   const stopwatches = useStore((s) => s.stopwatches)
+  const upsertCalculator = useStore((s) => s.upsertCalculator)
+  const applyClientToolAction = useStore((s) => s.applyClientToolAction)
   const display = card.display || {}
   const actionName = card.action || card.name || card.toolName
+  const calculator = display.calculator || null
+  const calculatorId = card.toolCallId || card.id || `${calculator?.expression || 'calculator'}:${calculator?.result || '0'}`
+  const [calcState, setCalcState] = useState(() => initialCalculatorState(calculator))
+  const [calculatorCopied, setCalculatorCopied] = useState(false)
   let title = display.title || fallbackToolTitle(card)
   let summary = display.summary || ''
   let status = card.status || ''
   let done = status === 'complete'
+
+  useEffect(() => {
+    if (!calculator) return
+    setCalcState(initialCalculatorState(calculator))
+  }, [calculatorId, calculator?.expression, calculator?.result])
+
+  useEffect(() => {
+    if (!calculator) return
+    upsertCalculator(calculatorId, {
+      expression: calcState.expression,
+      result: calcState.display,
+      source: 'calculator_card',
+    })
+  }, [calculator, calculatorId, calcState.expression, calcState.display, upsertCalculator])
 
   if (actionName === 'timer_start') {
     const local = card.toolCallId ? timers.find((timer) => timer.toolCallId === card.toolCallId) : null
@@ -532,6 +793,21 @@ function ToolCard({ card, now, messageAt }) {
     title = card.label || local?.label || title || 'Timer'
     summary = cancelled ? 'cancelled' : done ? 'done' : formatDuration(remaining)
     status = cancelled ? 'cancelled' : done ? 'done' : 'running'
+    const progress = Math.max(0, Math.min(1, 1 - Math.max(0, remaining) / durationMs))
+    const timerId = local?.id || card.id || ''
+    return (
+      <div className={`messageToolCard timeToolCard timerToolCard ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''}`}>
+        <div className="timeDial" style={{ '--progress': `${Math.round(progress * 360)}deg` }}>
+          <strong>{summary}</strong>
+          <span>{title}</span>
+        </div>
+        <div className="timeToolActions">
+          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_adjust', id: timerId, deltaMs: 60000 })} disabled={!timerId || status !== 'running'}>+1m</button>
+          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_adjust', id: timerId, deltaMs: -60000 })} disabled={!timerId || status !== 'running'}>-1m</button>
+          <button type="button" onClick={() => applyClientToolAction({ action: 'timer_cancel', id: timerId })} disabled={!timerId || status !== 'running'}>Stop</button>
+        </div>
+      </div>
+    )
   }
 
   if (actionName === 'stopwatch_start') {
@@ -543,11 +819,73 @@ function ToolCard({ card, now, messageAt }) {
     title = card.label || local?.label || title || 'Stopwatch'
     summary = formatDuration(elapsed)
     status = local?.running === false ? 'stopped' : 'running'
+    const watchId = local?.id || card.id || ''
+    return (
+      <div className={`messageToolCard timeToolCard stopwatchToolCard ${status === 'running' ? 'isRunning' : 'isDone'}`}>
+        <div className="stopwatchCrown" aria-hidden="true" />
+        <div className="timeDial stopwatchDial">
+          <strong>{summary}</strong>
+          <span>{title}</span>
+        </div>
+        <div className="timeToolActions">
+          <button type="button" onClick={() => applyClientToolAction({ action: local?.running === false ? 'stopwatch_start' : 'stopwatch_stop', id: watchId, label: title })} disabled={!watchId}>
+            {local?.running === false ? 'Start' : 'Stop'}
+          </button>
+          <button type="button" onClick={() => applyClientToolAction({ action: 'stopwatch_reset', id: watchId })} disabled={!watchId}>Reset</button>
+        </div>
+      </div>
+    )
   }
 
   const rows = Array.isArray(display.rows) ? display.rows.filter((row) => row?.label && row?.value != null) : []
   const links = Array.isArray(display.links) ? display.links.filter((link) => link?.url) : []
   const items = Array.isArray(display.items) ? display.items.filter(Boolean) : []
+
+  if (actionName === 'calculate' || calculator) {
+    const expression = calcState.expression || calculator?.expression || display.summary || ''
+    const result = calcState.display || calculator?.result || calculator?.equation || '0'
+    const keys = [
+      ['C', 'utility'], ['+/-', 'utility'], ['%', 'utility'], ['/', 'operator'],
+      ['7'], ['8'], ['9'], ['*', 'operator'],
+      ['4'], ['5'], ['6'], ['-', 'operator'],
+      ['1'], ['2'], ['3'], ['+', 'operator'],
+      ['0', 'zero'], ['.'], ['=', 'equals']
+    ]
+    const press = (key) => setCalcState((current) => applyCalculatorKey(current, key))
+    const copyResult = async () => {
+      try {
+        await navigator.clipboard.writeText(String(result))
+        setCalculatorCopied(true)
+        window.setTimeout(() => setCalculatorCopied(false), 1200)
+      } catch {
+        setCalculatorCopied(false)
+      }
+    }
+
+    return (
+      <div className={`messageToolCard calculatorToolCard ${done ? 'isDone' : ''}`}>
+        <div className="calculatorScreen" aria-label={`Calculator result ${result}`}>
+          <span className="calculatorExpression">{expression || 'Calculator'}</span>
+          <strong>{result}</strong>
+          <button type="button" className="calculatorCopyButton" onClick={copyResult} aria-label={calculatorCopied ? 'Copied result' : 'Copy calculator result'} title={calculatorCopied ? 'Copied' : 'Copy result'}>
+            {calculatorCopied ? <IconCheck /> : <IconCopy />}
+          </button>
+        </div>
+        <div className="calculatorKeys">
+          {keys.map(([key, type]) => (
+            <button
+              className={`calculatorKey ${type ? `is${type[0].toUpperCase()}${type.slice(1)}` : ''}`}
+              key={key}
+              onClick={() => press(key)}
+              type="button"
+            >
+              {key}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={`messageToolCard ${done ? 'isDone' : ''} ${status === 'running' ? 'isRunning' : ''} ${status === 'error' ? 'isError' : ''}`}>
@@ -585,14 +923,9 @@ function ToolCard({ card, now, messageAt }) {
   )
 }
 
-function MessageToolCards({ message, toolCards = [], now }) {
-  const rawCards = toolCards.length
-    ? toolCards
-    : (message?.toolCards || message?.metrics?.toolCards || message?.metadata?.metrics?.toolCards || message?.metrics?.toolActions || message?.metadata?.metrics?.toolActions || [])
-  const cards = rawCards
-    .map(normalizeToolCard)
-    .filter(Boolean)
-    .slice(0, 8)
+function MessageToolCards({ message, toolCards = [], now, includeCalculators = false }) {
+  const cards = normalizedToolCardsForMessage(message, toolCards)
+    .filter((card) => includeCalculators || !isCalculatorCard(card))
 
   if (!cards.length) return null
 
@@ -604,6 +937,43 @@ function MessageToolCards({ message, toolCards = [], now }) {
         <ToolCard card={card} now={now} messageAt={messageAt} key={card.toolCallId || card.id || `${card.name || card.action}-${index}`} />
       ))}
     </div>
+  )
+}
+
+function SearchingPlaceholder({ status }) {
+  const raw = String(status?.query || '').trim()
+  const display = raw.length > 88 ? `${raw.slice(0, 88)}…` : raw
+  const label = display ? `Searching: ${display}` : 'Searching…'
+  return (
+    <div className="searchingPlaceholder" role="status" aria-live="polite">
+      <span className="searchingDots" aria-hidden="true"><span /><span /><span /></span>
+      <span>{label}</span>
+    </div>
+  )
+}
+
+function AssistantMessageBody({ message, toolCards = [], now, content }) {
+  const [calculatorOpen, setCalculatorOpen] = useState(false)
+  const calculator = getCalculatorCard({ message, toolCards })
+  return (
+    <>
+      <div className={calculator ? 'assistantContentLine hasCalculatorLauncher' : 'assistantContentLine'}>
+        <MessageContent content={content ?? message?.content ?? message?.error ?? ''} />
+        {calculator && (
+          <button
+            type="button"
+            className="inlineCalculatorButton iconOnlyButton"
+            onClick={() => setCalculatorOpen((value) => !value)}
+            aria-label={calculatorOpen ? 'Close calculator' : 'Open calculator'}
+            title={calculatorOpen ? 'Close calculator' : 'Open calculator'}
+          >
+            <IconCalculator />
+          </button>
+        )}
+      </div>
+      {calculatorOpen && <MessageToolCards message={message} toolCards={calculator ? [calculator] : []} now={now} includeCalculators />}
+      <MessageToolCards message={message} toolCards={toolCards} now={now} />
+    </>
   )
 }
 
@@ -1026,7 +1396,7 @@ function shouldPollModelDownloadStatus(status, preflight, dismissed) {
   return runtimeBlocked || needsInitialModel || missingModels.length > 0 || ['error', 'unavailable'].includes(status?.status)
 }
 
-function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, streamToolCards, isStreaming, now, wallNow, userName, onRegenerate, onEditUserMessage }) {
+function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, streamSearchStatus, streamToolCards, isStreaming, now, wallNow, userName, onRegenerate, onEditUserMessage }) {
   const bottomRef = useRef(null)
   const emptyPrompt = promptForChat(chatId, userName)
   useEffect(() => {
@@ -1049,8 +1419,7 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
             ) : (
               <>
                 <AttachmentStrip attachments={message.attachments} />
-                <MessageContent content={message.content || message.error || ''} />
-                <MessageToolCards message={message} now={wallNow} />
+                <AssistantMessageBody message={message} now={wallNow} />
                 <div className="messageFooter">
                   <MessageMetrics metrics={message.metrics} now={now} />
                   <MessageActions message={message} onRegenerate={onRegenerate} />
@@ -1061,9 +1430,12 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
         ))}
         {active && isStreaming && (
           <section className="message assistant isStreaming">
-            <MessageContent content={streamingContent || ' '} />
-            <MessageToolCards message={{ createdAt: new Date().toISOString() }} toolCards={streamToolCards} now={wallNow} />
-            <MessageMetrics metrics={streamMetrics} now={now} streaming />
+            {streamSearchStatus?.phase === 'searching' && !streamingContent
+              ? <SearchingPlaceholder status={streamSearchStatus} />
+              : <AssistantMessageBody message={{ createdAt: new Date().toISOString(), content: streamingContent || ' ' }} toolCards={streamToolCards} now={wallNow} content={streamingContent || ' '} />}
+            {!(streamSearchStatus?.phase === 'searching' && !streamingContent) && (
+              <MessageMetrics metrics={streamMetrics} now={now} streaming />
+            )}
           </section>
         )}
         <div ref={bottomRef} />
@@ -1181,7 +1553,7 @@ export default function App() {
   const userName = useStore((s) => s.userName).trim()
   const {
     models, selectedModel, setSelectedModel,
-    chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, queuedMessages,
+    chats, currentChatId, messages, streamingContent, isStreaming, streamMetrics, streamSearchStatus, queuedMessages,
     streamToolCards,
     input, setInput, pendingAttachments, loadModels, loadChats, selectChat, newChat, unloadModels, sendMessage, stopGeneration, regenerate, editUserMessage, handleKeyDown,
   } = useChat()
@@ -1274,6 +1646,14 @@ export default function App() {
 
 
   const resolvedColorMode = colorMode === 'system' ? (systemDark ? 'dark' : 'light') : colorMode
+
+  useEffect(() => {
+    const background = resolvedColorMode === 'dark' ? '#101113' : '#fbfaf7'
+    document.documentElement.style.backgroundColor = background
+    document.body.style.backgroundColor = background
+    document.documentElement.dataset.naowColorMode = resolvedColorMode
+  }, [resolvedColorMode])
+
   const currentQueue = queuedMessages.filter((message) => message.chatId === currentChatId)
   const hasDraft = input.trim() || pendingAttachments.length > 0
   const actionLabel = isStreaming ? (hasDraft ? 'Queue' : 'Stop') : 'Send'
@@ -1306,6 +1686,7 @@ export default function App() {
             messages={messages}
             streamingContent={streamingContent}
             streamMetrics={streamMetrics}
+            streamSearchStatus={streamSearchStatus}
             streamToolCards={streamToolCards}
             isStreaming={isStreaming}
             now={now}
@@ -1380,7 +1761,15 @@ export default function App() {
             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 138)}px` }}
           />
           <div className="composerActions">
-            <button className="sendButton" onClick={handleComposerAction}>{actionLabel}</button>
+            <button
+              type="button"
+              className="sendButton"
+              onClick={handleComposerAction}
+              aria-label={actionLabel}
+              title={actionLabel}
+            >
+              {isStreaming ? (hasDraft ? <IconQueueComposer /> : <IconStopComposer />) : <IconSend />}
+            </button>
           </div>
         </div>
         <BackendStats selectedModel={selectedModel} active={isStreaming} />

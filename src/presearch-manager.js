@@ -8,6 +8,12 @@ const SEARCHY_PATTERNS = [
   /\bgoogle\s+(it|this|that|for)\b/i
 ];
 
+const EXPLICIT_SEARCH_PATTERNS = [
+  /\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:google|search|browse|look\s+up|check\s+(?:online|the\s+web|the\s+internet))\b/i,
+  /\b(?:please\s+)?(?:google|search|browse|look\s+up|check\s+(?:online|the\s+web|the\s+internet))\s+(?:please\b|for\b|this\b|that\b|it\b|the\b|a\b|an\b)/i,
+  /\b(?:use|do)\s+(?:a\s+)?(?:web\s+)?search\b/i
+];
+
 const GENERAL_COMPARISON_PATTERNS = [
   /\b(difference|differences)\s+between\b/i,
   /\b(compare|comparison|versus|vs\.?)\b/i,
@@ -74,11 +80,13 @@ function extractJson(text) {
 
 function fallbackClassification(draft) {
   const text = String(draft || '').trim();
-  const shouldSearch = SEARCHY_PATTERNS.some((pattern) => pattern.test(text));
+  const explicitSearch = EXPLICIT_SEARCH_PATTERNS.some((pattern) => pattern.test(text));
+  const shouldSearch = explicitSearch || SEARCHY_PATTERNS.some((pattern) => pattern.test(text));
   return {
     shouldSearch,
-    confidence: shouldSearch ? 0.72 : 0.2,
-    queries: shouldSearch ? [text] : []
+    confidence: explicitSearch ? 1 : (shouldSearch ? 0.72 : 0.2),
+    queries: shouldSearch ? [text.replace(/\b(?:can|could|would)\s+you\s+(?:please\s+)?/i, '').replace(/\bplease\b/gi, '').trim() || text] : [],
+    explicitSearch
   };
 }
 
@@ -103,6 +111,77 @@ function safeQueries(queries, fallback, maxQueries) {
   }
   if (!output.length && fallback) output.push(fallback);
   return output.slice(0, maxQueries);
+}
+
+/** When the rewriter fails, drop obvious meta-rants so we do not search for them literally. */
+function scrubMetaFromSearchText(text) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  t = t.replace(/\b(u|you)\s+(didn'?t|did not|aint|ain'?t)\s+(even\s+)?search\s+(for\s+)?(crap|anything|jack|shit|nothing)\b/gi, ' ');
+  t = t.replace(/\b(u|you)\s+(didn'?t|did not)\s+(even\s+)?(run\s+)?a\s+search\b/gi, ' ');
+  t = t.replace(/\bthis\s+is\s+(bs|bullshit)\b/gi, ' ');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+async function rewriteSearchQueriesWithSmallModel(manager, draft, fallback, signal) {
+  const mlx = manager.modelClient?.mlx || manager.modelClient;
+  if (!mlx?.completeChat) {
+    const fb = fallback.queries?.[0] || String(draft || '').trim();
+    const cleaned = scrubMetaFromSearchText(fb) || fb;
+    return {
+      ...fallback,
+      queries: safeQueries([cleaned], cleaned, manager.config.preSearchMaxQueries),
+      confidence: Math.max(Number(fallback.confidence || 0), 0.72)
+    };
+  }
+  const system = [
+    'You write web search queries for a search engine. Reply with ONLY compact JSON: {"queries":["..."]}',
+    'queries: 1 to 5 short strings (each under 14 words). No surrounding quotes on the JSON keys beyond valid JSON.',
+    'Strip insults, swearing, and meta talk about searching (e.g. complaints that the assistant did not search, "look it up", "try again").',
+    'Keep concrete entities: person names, GitHub usernames, repo names, app names, version numbers, locations.',
+    'If the user cares about GitHub users/repos or open-source projects, put github or site:github.com in at least one query.',
+    'The first query must be the best single search for the user\'s underlying factual question.',
+    'If the latest message only reacts to the assistant and repeats an earlier topic, use the earlier topic in the queries.'
+  ].join('\n');
+  try {
+    const result = await mlx.completeChat({
+      model: manager.config.preSearchModel,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: String(draft || '').slice(0, manager.config.preSearchMaxDraftChars) }
+      ],
+      options: {
+        max_tokens: 160,
+        temperature: 0,
+        enable_thinking: false
+      },
+      signal
+    });
+    const parsed = extractJson(result.message?.content || result.content || '');
+    const rawFallback = fallback.queries?.[0] || String(draft || '').trim();
+    const cleanedFallback = scrubMetaFromSearchText(rawFallback) || rawFallback;
+    const queries = safeQueries(parsed?.queries, cleanedFallback, manager.config.preSearchMaxQueries);
+    if (!queries.length) {
+      return {
+        ...fallback,
+        queries: safeQueries([cleanedFallback], cleanedFallback, manager.config.preSearchMaxQueries),
+        confidence: Math.max(Number(fallback.confidence || 0), 0.72)
+      };
+    }
+    return {
+      shouldSearch: true,
+      confidence: Math.max(Number(fallback.confidence || 0), 0.88),
+      queries,
+      explicitSearch: Boolean(fallback.explicitSearch)
+    };
+  } catch {
+    const rawFallback = fallback.queries?.[0] || String(draft || '').trim();
+    const cleanedFallback = scrubMetaFromSearchText(rawFallback) || rawFallback;
+    return {
+      ...fallback,
+      queries: safeQueries([cleanedFallback], cleanedFallback, manager.config.preSearchMaxQueries),
+      confidence: Math.max(Number(fallback.confidence || 0), 0.72)
+    };
+  }
 }
 
 export class PreSearchManager {
@@ -142,6 +221,9 @@ export class PreSearchManager {
   async classify(draft, signal, { forceModel = false } = {}) {
     const fallback = fallbackClassification(draft);
     if (!fallback.shouldSearch && !forceModel) return fallback;
+    if (fallback.shouldSearch) {
+      return rewriteSearchQueriesWithSmallModel(this, draft, fallback, signal);
+    }
     const mlx = this.modelClient?.mlx || this.modelClient;
     if (!mlx?.completeChat) return fallback;
     try {
@@ -151,9 +233,9 @@ export class PreSearchManager {
           {
             role: 'system',
             content: [
-              'Decide if this user message truly needs current web search before answering.',
-              'Return shouldSearch true only when the answer would likely be wrong or stale without external current facts.',
-              'Return false for ordinary explanations, coding help, definitions, brainstorming, and general comparisons unless the user asks for latest/current/recent/pricing/news/docs/sources.',
+              'Decide if this user message needs current web search before answering.',
+              'Bias toward shouldSearch true when the answer could be wrong, stale, or incomplete without the web — including indirect asks (e.g. "what happened with…", "is X still…", soft factual questions).',
+              'Return false mainly for pure opinion, fiction, generic brainstorming, or stable timeless definitions with no current-facts angle.',
               'Return only compact JSON with keys shouldSearch, confidence, queries.',
               'queries must contain at most 5 short web search queries.'
             ].join('\n')
@@ -194,6 +276,14 @@ export class PreSearchManager {
       return { shouldSearch: false, confidence: 0.9, queries: [], skipped: 'general_comparison' };
     }
     const fallback = fallbackClassification(text);
+    if (fallback.explicitSearch) {
+      return {
+        shouldSearch: true,
+        confidence: 1,
+        queries: safeQueries(fallback.queries, text, this.config.preSearchMaxQueries),
+        explicitSearch: true
+      };
+    }
     if (!fallback.shouldSearch) {
       return { ...fallback, skipped: 'heuristic_not_needed' };
     }

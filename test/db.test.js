@@ -103,3 +103,35 @@ test('visible context includes image attachments', () => {
     cleanup();
   }
 });
+
+test('visible context carries calculator tool results for follow-ups', () => {
+  const { db, cleanup } = tempDb();
+  try {
+    const chat = db.createChat();
+    db.createUserMessage(chat.id, '67*67');
+    const assistant = db.createAssistantMessage(chat.id, 'gen_calc');
+    db.finalizeMessage(assistant.id, {
+      content: '4489',
+      status: 'complete',
+      metadata: {
+        metrics: {
+          toolCards: [{
+            name: 'calculate',
+            display: {
+              calculator: {
+                expression: '67*67',
+                result: '4489'
+              }
+            }
+          }]
+        }
+      }
+    });
+
+    const context = db.getVisibleContext(db.getChat(chat.id));
+    assert.match(context.at(-1).content, /4489/);
+    assert.match(context.at(-1).content, /calculator result: 67\*67 = 4489/);
+  } finally {
+    cleanup();
+  }
+});

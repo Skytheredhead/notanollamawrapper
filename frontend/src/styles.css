@@ -20,14 +20,24 @@
 html,
 body,
 #root {
+  width: 100%;
+  min-height: 100%;
   overscroll-behavior-x: none;
+  background: #101113;
 }
 
 body {
   margin: 0;
   font-family: var(--body);
-  background: var(--bg);
+  overflow: hidden;
+  background: #101113;
   color: var(--ink);
+}
+
+html[data-naow-color-mode="light"],
+html[data-naow-color-mode="light"] body,
+html[data-naow-color-mode="light"] #root {
+  background: #fbfaf7;
 }
 
 button, input, textarea, select { font: inherit; }
@@ -35,6 +45,8 @@ button, input, textarea, select { font: inherit; }
 .app {
   position: relative;
   height: 100vh;
+  height: 100dvh;
+  min-height: 100svh;
   overflow: hidden;
   overscroll-behavior-x: none;
   display: grid;
@@ -55,19 +67,19 @@ button, input, textarea, select { font: inherit; }
   position: fixed;
   top: 0;
   bottom: 0;
-  width: min(24vw, 420px);
+  width: min(13vw, 220px);
   z-index: 15;
   pointer-events: none;
 }
 
 .app::before {
   left: 0;
-  background: linear-gradient(90deg, var(--edge-fade) 0%, color-mix(in srgb, var(--edge-fade) 78%, transparent) 38%, transparent 100%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--edge-fade) 82%, transparent) 0%, color-mix(in srgb, var(--edge-fade) 36%, transparent) 42%, transparent 100%);
 }
 
 .app::after {
   right: 0;
-  background: linear-gradient(270deg, var(--edge-fade) 0%, color-mix(in srgb, var(--edge-fade) 78%, transparent) 38%, transparent 100%);
+  background: linear-gradient(270deg, color-mix(in srgb, var(--edge-fade) 82%, transparent) 0%, color-mix(in srgb, var(--edge-fade) 36%, transparent) 42%, transparent 100%);
 }
 
 .app .themeFade {
@@ -270,19 +282,31 @@ button, input, textarea, select { font: inherit; }
 }
 
 .settingsButton {
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
   padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  border-radius: 0;
+}
+
+.settingsButton:hover,
+.settingsButton:focus-visible {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
+  transform: none;
 }
 
 .settingsButton svg {
-  width: 20px;
-  height: 20px;
+  width: 21px;
+  height: 21px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -909,7 +933,7 @@ button, input, textarea, select { font: inherit; }
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.32);
   backdrop-filter: blur(20px);
   transform: translate(-50%, -50%);
-  animation: popCentered 160ms ease both;
+  animation: sourcesPopoverReveal 200ms ease both;
 }
 
 .sourcesPopoverHeader {
@@ -993,6 +1017,23 @@ button, input, textarea, select { font: inherit; }
   font-size: 13px;
   font-style: normal;
   line-height: 1.3;
+}
+
+.sourceResult.sourceReveal {
+  opacity: 0;
+  animation: sourceRowIn 420ms ease forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sourceResult.sourceReveal {
+    animation: none;
+    opacity: 1;
+  }
+
+  .sourcesPopover {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 .messageActions {
@@ -1144,6 +1185,206 @@ button, input, textarea, select { font: inherit; }
   border-color: color-mix(in srgb, #d74242 42%, var(--line));
 }
 
+.timeToolCard {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: 202px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--surface-strong) 60%, transparent);
+}
+
+.timeDial {
+  --progress: 0deg;
+  width: 118px;
+  height: 118px;
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--surface-strong) 88%, var(--bg)) 0 60%, transparent 61%),
+    conic-gradient(color-mix(in srgb, var(--accent) 72%, var(--ink)) var(--progress), color-mix(in srgb, var(--muted) 16%, transparent) 0);
+  text-align: center;
+}
+
+.timeDial strong {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.timeDial span {
+  max-width: 82px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stopwatchToolCard {
+  position: relative;
+  padding-top: 18px;
+}
+
+.stopwatchCrown {
+  position: absolute;
+  top: 7px;
+  left: 50%;
+  width: 22px;
+  height: 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  transform: translateX(-50%);
+}
+
+.stopwatchDial {
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--surface-strong) 88%, var(--bg)) 0 62%, transparent 63%),
+    conic-gradient(color-mix(in srgb, var(--accent) 42%, var(--ink)) 360deg, transparent 0);
+}
+
+.timeToolActions {
+  display: flex;
+  gap: 6px;
+}
+
+.timeToolActions button {
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.timeToolActions button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+
+.timeToolActions button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.calculatorToolCard {
+  width: 214px;
+  padding: 8px;
+  border-color: color-mix(in srgb, var(--line) 82%, var(--accent));
+  background: color-mix(in srgb, var(--surface-strong) 70%, transparent);
+}
+
+.calculatorScreen {
+  position: relative;
+  display: grid;
+  min-height: 62px;
+  align-content: end;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 72%, var(--surface));
+  text-align: right;
+}
+
+.calculatorExpression {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calculatorScreen strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calculatorCopyButton {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.calculatorCopyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.calculatorCopyButton:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.calculatorKeys {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.calculatorKey {
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  color: color-mix(in srgb, var(--ink) 88%, var(--muted));
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.calculatorKey:hover {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+  color: var(--ink);
+}
+
+.calculatorKey.isUtility {
+  color: var(--muted);
+}
+
+.calculatorKey.isOperator,
+.calculatorKey.isEquals {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent) 11%, var(--surface));
+  color: color-mix(in srgb, var(--accent) 68%, var(--ink));
+}
+
+.calculatorKey.isZero {
+  grid-column: span 2;
+}
+
 .toolCardRows {
   display: grid;
   grid-template-columns: minmax(54px, max-content) minmax(0, 1fr);
@@ -1230,6 +1471,59 @@ button, input, textarea, select { font: inherit; }
   line-height: 1.6;
   overflow-wrap: anywhere;
   word-break: normal;
+}
+
+.assistantContentLine {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.assistantContentLine .messageContent {
+  min-width: 0;
+}
+
+.inlineCalculatorButton {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.inlineCalculatorButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.searchingPlaceholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.searchingDots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.searchingDots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: searchPulse 900ms ease-in-out infinite;
+}
+
+.searchingDots span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.searchingDots span:nth-child(3) {
+  animation-delay: 240ms;
 }
 
 .messageAttachments {
@@ -1473,6 +1767,10 @@ button, input, textarea, select { font: inherit; }
   white-space: nowrap;
 }
 
+.contextStat {
+  gap: 4px;
+}
+
 .statValue {
   color: color-mix(in srgb, var(--muted) 72%, transparent);
   font-variant-numeric: tabular-nums;
@@ -1620,27 +1918,47 @@ button, input, textarea, select { font: inherit; }
   margin: 0;
   grid-column: 1;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 76px;
-  gap: 10px;
+  grid-template-columns: 34px minmax(0, 1fr) max-content;
+  gap: 13px;
   align-items: end;
-  background: color-mix(in srgb, var(--surface-strong) 42%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
-  border-radius: var(--radius);
-  padding: 8px 9px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 13%, transparent);
+  border-radius: 0;
+  padding: 0 0 7px;
   box-shadow: none;
-  backdrop-filter: blur(14px);
-  transition: background 520ms ease, color 520ms ease, border-color 420ms ease, box-shadow 420ms ease;
+  backdrop-filter: none;
+  transition: background 520ms ease, color 520ms ease, border-color 240ms ease;
+}
+
+.composerShell:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .composerShell.isDropping {
   border-color: color-mix(in srgb, var(--accent) 38%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface-strong));
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 
 .attachButton {
-  min-height: 46px;
-  font-size: 22px;
+  min-height: 42px;
+  width: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  padding: 0;
+  font-size: 23px;
   line-height: 1;
+  transition: color 180ms ease, transform 160ms ease;
+}
+
+.attachButton:hover,
+.attachButton:focus-visible {
+  color: var(--ink);
+  transform: none;
 }
 
 .composer textarea {
@@ -1654,34 +1972,47 @@ button, input, textarea, select { font: inherit; }
   border: 0;
   background: transparent;
   color: var(--ink);
-  padding: 12px 12px;
+  padding: 11px 0 3px;
   line-height: 1.45;
 }
 
 .composerActions {
   display: flex;
   gap: 8px;
-  width: 76px;
+  width: auto;
   align-self: stretch;
 }
 
 .sendButton {
-  width: 100%;
-  min-width: 0;
-  min-height: 46px;
+  width: auto;
+  min-width: 40px;
+  min-height: 42px;
   display: grid;
   place-items: center;
+  border: 0;
+  border-radius: var(--radius);
   background: transparent;
-  color: var(--ink);
-  border-color: color-mix(in srgb, var(--ink) 12%, transparent);
-  padding: 12px 14px;
-  font-weight: 700;
-  white-space: nowrap;
+  color: color-mix(in srgb, var(--ink) 86%, transparent);
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.sendButton svg {
+  width: 19px;
+  height: 19px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .sendButton:hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border-color: color-mix(in srgb, var(--ink) 22%, transparent);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink);
+  border-color: transparent;
+  transform: none;
 }
 
 pre {
@@ -1824,6 +2155,22 @@ pre {
   to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 
+@keyframes sourcesPopoverReveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sourceRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes foldAway {
   from { opacity: 1; transform: translateY(0) scale(1); }
   to { opacity: 0; transform: translateY(-4px) scale(0.97); }
@@ -1849,6 +2196,11 @@ pre {
   to { opacity: 0.4; transform: translateY(-100%); }
 }
 
+@keyframes searchPulse {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .statValue.isAnimating .statValueItem.current,
   .statValue.isAnimating .statValueItem.previous {
@@ -1861,27 +2213,88 @@ pre {
 }
 
 @media (max-width: 720px) {
+  .app::before,
+  .app::after {
+    display: none;
+  }
+
   .topBar {
-    grid-template-columns: auto 1fr auto;
-    padding: 10px;
-    gap: 8px;
+    height: 54px;
+    grid-template-columns: 86px minmax(0, 1fr) 42px;
+    padding: max(6px, env(safe-area-inset-top)) 12px 6px;
+    gap: 10px;
+  }
+
+  .topSearch {
+    width: 86px;
+  }
+
+  .searchWrap {
+    width: 86px;
+    grid-template-columns: 18px minmax(0, 1fr);
+    gap: 5px;
+    padding-bottom: 5px;
+  }
+
+  .searchIcon {
+    width: 15px;
+    height: 15px;
+    transform: translateY(6px);
+  }
+
+  .searchInput {
+    padding-top: 7px;
+    font-size: 13px;
+  }
+
+  .searchPlaceholder {
+    padding-top: 7px;
+    font-size: 12px;
+    transform: translateY(5px);
+  }
+
+  .brandButton {
+    min-width: 0;
+    padding: 3px 0;
+    font-size: 30px;
+    line-height: 1;
+  }
+
+  .settingsButton {
+    width: 34px;
+    height: 34px;
+  }
+
+  .settingsPanel {
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 54px);
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100dvh - 74px);
+    overflow-y: auto;
   }
 
   .chatViewport,
   .attachmentTray {
-    width: calc(100vw - 44px);
+    width: 100%;
   }
 
   .composer {
     grid-template-columns: minmax(0, 1fr);
-    gap: 7px;
-    padding: 10px 22px 18px;
+    gap: 4px;
+    padding: 6px max(18px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
   }
 
   .backendStats {
     grid-column: 1;
     max-width: 100%;
     font-size: 9.5px;
+    gap: 4px 10px;
+  }
+
+  .statValue {
+    width: min(var(--stat-width), 7ch);
   }
 
   .modelDownloadToast,
@@ -1902,20 +2315,71 @@ pre {
 
   .composerShell {
     grid-column: 1;
-    grid-template-columns: 40px minmax(0, 1fr) 68px;
+    grid-template-columns: 30px minmax(0, 1fr) max-content;
+    gap: 9px;
+    padding: 0 0 6px;
+  }
+
+  .attachButton {
+    min-height: 38px;
+    width: 30px;
+    font-size: 20px;
+  }
+
+  .composer textarea {
+    min-height: 38px;
+    max-height: 104px;
+    padding: 9px 8px;
+    font-size: 15px;
   }
 
   .composerActions {
-    width: 68px;
+    width: auto;
+  }
+
+  .sendButton {
+    min-width: 38px;
+    min-height: 38px;
+    padding: 0 2px;
+  }
+
+  .sendButton svg {
+    width: 18px;
+    height: 18px;
   }
 
   .messageList {
-    padding: 16px;
+    padding: 14px 18px 96px;
+  }
+
+  .message {
+    max-width: 100%;
+    margin-bottom: 12px;
+  }
+
+  .emptyState {
+    min-height: min(58dvh, 430px);
+    transform: translateY(-5dvh);
+  }
+
+  .emptyState strong {
+    font-size: clamp(26px, 8vw, 34px);
+  }
+
+  .emptyState span {
+    font-size: 14px;
   }
 
   .newThreadButton {
-    right: 16px;
-    width: 46px;
-    height: 46px;
+    top: 76px;
+    right: 18px;
+    width: 40px;
+    height: 40px;
+  }
+
+  .newThreadButton span,
+  .newThreadButton span::before,
+  .newThreadButton span::after {
+    width: 16px;
   }
 }

@@ -16,14 +16,54 @@ function rowToChat(row) {
   };
 }
 
-function rowToMessage(row) {
-  if (!row) return null;
+function metadataFromRow(row) {
   let metadata = {};
   try {
     metadata = row.metadata_json ? JSON.parse(row.metadata_json) : {};
   } catch {
     metadata = {};
   }
+  return metadata;
+}
+
+function truncateContextNote(value, maxChars = 700) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 12)).trim()}...`;
+}
+
+function toolCardsContext(metadata = {}) {
+  const cards = metadata.metrics?.toolCards || [];
+  const lines = [];
+  for (const card of cards.slice(-4)) {
+    const name = card.name || card.toolName;
+    const display = card.display || {};
+    if (name === 'calculate' && display.calculator) {
+      const expression = display.calculator.expression || '';
+      const result = display.calculator.result ?? '';
+      if (result !== '') lines.push(`calculator result: ${expression ? `${expression} = ` : ''}${result}`);
+      continue;
+    }
+    if (name === 'get_weather') {
+      const title = display.title || 'weather';
+      const summary = display.summary || '';
+      const rows = Array.isArray(display.rows)
+        ? display.rows.slice(0, 4).map((row) => `${row.label}: ${row.value}`).join('; ')
+        : '';
+      lines.push(`weather result: ${[title, summary, rows].filter(Boolean).join(' - ')}`);
+      continue;
+    }
+    if (name && display.summary) {
+      lines.push(`${name} result: ${display.summary}`);
+    }
+  }
+  if (!lines.length) return '';
+  return `[Internal tool context for follow-ups: ${truncateContextNote(lines.join('; '))}]`;
+}
+
+function rowToMessage(row) {
+  if (!row) return null;
+  const metadata = metadataFromRow(row);
   return {
     id: row.id,
     chatId: row.chat_id,
@@ -260,14 +300,14 @@ export class LocalDatabase {
         ORDER BY created_at ASC, id ASC
       `),
       getVisibleContext: this.db.prepare(`
-        SELECT id, role, content FROM messages
+        SELECT id, role, content, metadata_json FROM messages
         WHERE chat_id = ?
           AND status IN ('complete', 'cancelled')
           AND content != ''
         ORDER BY created_at ASC, id ASC
       `),
       getVisibleContextBefore: this.db.prepare(`
-        SELECT id, role, content FROM messages
+        SELECT id, role, content, metadata_json FROM messages
         WHERE chat_id = ?
           AND status IN ('complete', 'cancelled')
           AND content != ''
@@ -423,7 +463,10 @@ export class LocalDatabase {
 
     const messages = rows.map((row) => ({
       role: row.role,
-      content: row.content,
+      content: [
+        row.content,
+        row.role === 'assistant' ? toolCardsContext(metadataFromRow(row)) : ''
+      ].filter(Boolean).join('\n\n'),
       attachments: this.statements.getContextAttachments.all(row.id).map(rowToAttachment)
     }));
 

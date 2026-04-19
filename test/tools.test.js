@@ -26,7 +26,65 @@ test('calculator fast path evaluates arithmetic without eval', async () => {
   const result = await runFastTool('what is (2 + 3) * 4?', runtime, { toolsOptions });
   assert.equal(result.name, 'calculate');
   assert.equal(result.result.result, 20);
+  assert.equal(result.text, '20');
+  const casual = await runFastTool('whats 5*5', runtime, { toolsOptions });
+  assert.equal(casual.name, 'calculate');
+  assert.equal(casual.result.result, 25);
+  assert.equal(casual.text, '25');
   await assert.rejects(() => executeTool('calculate', { expression: 'process.exit()' }, runtime), /Function process needs parentheses|Unknown function/);
+});
+
+test('weather fast path treats a location-only reply as the requested weather location', async () => {
+  const fetchImpl = async (url) => {
+    const value = String(url);
+    if (value.startsWith('https://geo.test')) {
+      return Response.json({
+        results: [{
+          name: 'Sammamish',
+          admin1: 'Washington',
+          country: 'United States',
+          latitude: 47.61,
+          longitude: -122.04,
+          timezone: 'America/Los_Angeles'
+        }]
+      });
+    }
+    return Response.json({
+      timezone: 'America/Los_Angeles',
+      current: {
+        time: '2026-04-18T21:00',
+        temperature_2m: 52,
+        apparent_temperature: 51,
+        relative_humidity_2m: 80,
+        precipitation: 0,
+        weather_code: 3,
+        wind_speed_10m: 5,
+        wind_gusts_10m: 9
+      },
+      daily: {
+        time: ['2026-04-18'],
+        weather_code: [3],
+        temperature_2m_max: [58],
+        temperature_2m_min: [45],
+        precipitation_probability_max: [20],
+        precipitation_sum: [0],
+        wind_speed_10m_max: [7]
+      }
+    });
+  };
+  const runtime = createToolRuntime(config, {}, fetchImpl);
+  const toolsOptions = toolOptionsFromBody({}, { webSearch: false });
+  const result = await runFastTool('sammamish, wa', runtime, {
+    toolsOptions,
+    messages: [
+      { role: 'user', content: 'yo whats the weather right now?' },
+      { role: 'assistant', content: 'What location should I check the weather for?' },
+      { role: 'user', content: 'sammamish, wa' }
+    ]
+  });
+  assert.equal(result.name, 'get_weather');
+  assert.match(result.text, /Sammamish, Washington, United States/);
+  assert.match(result.text, /52F/);
 });
 
 test('unit conversion handles common units', async () => {

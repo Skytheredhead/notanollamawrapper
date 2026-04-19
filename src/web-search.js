@@ -373,11 +373,12 @@ export class WebSearchClient {
   }
 }
 
-export function formatSearchResultsForContext(results, maxChars = 12000) {
-  const rendered = (results || []).map((result, index) => {
+export function formatSearchResultsForContext(results, maxChars = 12000, { contentChars = 650, limit = null } = {}) {
+  const items = limit != null && Number.isFinite(Number(limit)) ? (results || []).slice(0, Number(limit)) : (results || []);
+  const rendered = items.map((result, index) => {
     const title = result.title || 'Untitled result';
     const url = result.url || 'No URL';
-    const content = truncate(result.content || result.snippet || '', 650);
+    const content = truncate(result.content || result.snippet || '', contentChars);
     return `${index + 1}. ${title}\nURL: ${url}${content ? `\nContent: ${content}` : ''}`;
   }).join('\n\n');
   return truncate(rendered, maxChars);

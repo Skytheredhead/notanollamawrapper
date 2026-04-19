@@ -392,6 +392,142 @@ test('message route forwards prompt cache metadata and persists runner timings',
   }
 });
 
+test('message route warms MLX prompt cache while normal search runs', async () => {
+  let warmRequest;
+  let receivedMessages;
+  const searchClient = {
+    async search() {
+      return {
+        provider: 'searxng',
+        resultCount: 1,
+        results: [{
+          title: 'Current result',
+          url: 'https://example.com/current',
+          content: 'Fresh context.'
+        }]
+      };
+    }
+  };
+  const preSearchManager = {
+    async classifySubmitted() {
+      return { shouldSearch: true, confidence: 0.94, queries: ['current query'] };
+    }
+  };
+  const harness = makeHarness({}, {
+    backendForModel() {
+      return { id: 'mlx', label: 'MLX' };
+    },
+    async warmPromptCache(request) {
+      if (request.source === 'search_overlap') warmRequest = request;
+      return {
+        warmed: true,
+        enabled: true,
+        hit: true,
+        elapsedMs: 33,
+        reusedTokens: 80,
+        newTokens: 12,
+        promptTokens: 92,
+        key: 'warm-key'
+      };
+    },
+    async *streamChat({ messages }) {
+      receivedMessages = messages;
+      yield {
+        type: 'meta',
+        promptCache: {
+          enabled: true,
+          hit: true,
+          reusedTokens: 92,
+          newTokens: 9
+        }
+      };
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  }, searchClient, { preSearchManager });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'mlx-community/Qwen3.5-9B-MLX-4bit'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'What is current today?',
+        searchStrategy: 'normal'
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(warmRequest.source, 'search_overlap');
+    assert.match(warmRequest.messages.at(-1).content, /Latest user message:\n\nWhat is current today\?\n\nWeb search was run[\s\S]+Search results:$/);
+    assert.match(receivedMessages.at(-1).content, /Latest user message:\n\nWhat is current today\?\n\nWeb search was run[\s\S]+Search results:\n1\. Current result/);
+    const complete = parseSse(response.payload).at(-1).data.message;
+    assert.equal(complete.metrics.prefixWarmSource, 'search_overlap');
+    assert.equal(complete.metrics.prefixWarmMs, 33);
+    assert.equal(complete.metrics.prefixWarmReusedTokens, 80);
+    assert.equal(complete.metrics.prefixWarmNewTokens, 12);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('message route schedules canonical MLX prompt warm after completion', async () => {
+  const warmSources = [];
+  const harness = makeHarness({}, {
+    backendForModel() {
+      return { id: 'mlx', label: 'MLX' };
+    },
+    async warmPromptCache(request) {
+      warmSources.push(request.source);
+      return {
+        warmed: true,
+        enabled: true,
+        elapsedMs: 5,
+        reusedTokens: 0,
+        newTokens: 20
+      };
+    },
+    async *streamChat() {
+      yield { type: 'token', delta: 'ok' };
+      yield { type: 'done', doneReason: 'stop' };
+    }
+  });
+
+  try {
+    const create = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chats',
+      payload: {
+        model: 'mlx-community/Qwen3.5-9B-MLX-4bit'
+      }
+    });
+    const chat = create.json().chat;
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/api/chats/${chat.id}/messages`,
+      payload: {
+        content: 'hello',
+        webSearch: false
+      }
+    });
+
+    assert.equal(response.statusCode, 200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(warmSources.includes('post_response'), true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('message route adds web search context when enabled and available', async () => {
   let receivedQuery;
   let receivedMaxResults;
@@ -443,9 +579,10 @@ test('message route adds web search context when enabled and available', async (
     assert.equal(response.statusCode, 200);
     assert.equal(receivedQuery, 'What changed today?');
     assert.equal(receivedMaxResults, 2);
-    assert.equal(receivedMessages[0].role, 'system');
-    assert.match(receivedMessages[0].content, /Web search results/);
-    assert.match(receivedMessages[0].content, /https:\/\/example\.com\/result/);
+    assert.equal(receivedMessages.at(-1).role, 'user');
+    assert.match(receivedMessages.at(-1).content, /Search result/);
+    assert.match(receivedMessages.at(-1).content, /https:\/\/example\.com\/result/);
+    assert.match(receivedMessages.at(-1).content, /Latest user message:\n\nWhat changed today\?/);
 
     const events = parseSse(response.payload);
     const complete = events.at(-1).data.message;
@@ -636,7 +773,7 @@ test('message route consumes matching pre-search results without emitting search
     const complete = events.at(-1).data.message;
     assert.equal(response.statusCode, 200);
     assert.equal(normalSearchCalled, false);
-    assert.match(receivedMessages[0].content, /https:\/\/example\.com\/pre/);
+    assert.match(receivedMessages.at(-1).content, /https:\/\/example\.com\/pre/);
     assert.equal(events.find((event) => event.event === 'web_search'), undefined);
     assert.equal(complete.metrics.webSearch.fromPreSearch, true);
     assert.equal(complete.metrics.sources[0].url, 'https://example.com/pre');

@@ -15,6 +15,8 @@ const LOCAL_TOOL_NAMES = new Set([
   'password_generate',
   'timer_start',
   'timer_cancel',
+  'timer_adjust',
+  'timer_set',
   'timer_list',
   'stopwatch_start',
   'stopwatch_stop',
@@ -55,6 +57,8 @@ function labelForTool(name) {
     password_generate: 'Password',
     timer_start: 'Timer',
     timer_cancel: 'Timer',
+    timer_adjust: 'Timer',
+    timer_set: 'Timer',
     timer_list: 'Timers',
     stopwatch_start: 'Stopwatch',
     stopwatch_stop: 'Stopwatch',
@@ -91,6 +95,21 @@ function displayForClientAction(name, action = {}) {
   }
   if (name === 'timer_cancel') {
     return { title: 'Timer', summary: 'Cancelled', rows: compactRows([{ label: 'ID', value: action.id }]) };
+  }
+  if (name === 'timer_adjust') {
+    const deltaMs = Number(action.deltaMs || 0);
+    return {
+      title: 'Timer',
+      summary: `${deltaMs >= 0 ? 'Added' : 'Removed'} ${Math.round(Math.abs(deltaMs) / 1000)}s`,
+      rows: compactRows([{ label: 'ID', value: action.id }])
+    };
+  }
+  if (name === 'timer_set') {
+    return {
+      title: 'Timer',
+      summary: `Set to ${Math.round(Number(action.durationMs || 0) / 1000)}s`,
+      rows: compactRows([{ label: 'ID', value: action.id }])
+    };
   }
   if (name === 'stopwatch_start') {
     return { title: 'Stopwatch', summary: label };
@@ -162,11 +181,11 @@ export function buildToolDisplay(toolResult = {}, { maxChars = 3000 } = {}) {
   if (name === 'calculate') {
     return {
       title: 'Calculator',
-      summary: truncateOneLine(text),
-      rows: compactRows([
-        { label: 'Expression', value: result.expression },
-        { label: 'Result', value: result.result }
-      ])
+      calculator: {
+        expression: result.expression,
+        result: result.displayResult ?? result.result,
+        equation: result.equation || text
+      }
     };
   }
 
@@ -295,7 +314,7 @@ export function toolSchemas({ allowed = ALL_TOOL_NAMES } = {}) {
       location: { type: 'string' },
       days: { type: 'number' }
     }, ['location']),
-    schema('web_search', 'Search the web for current information.', {
+    schema('web_search', 'Search the web for current information. The query must be short search-engine text (names, repos, site:github.com, product titles)—not the user\'s rant, not accusations about searching, and not a copy of their last message unless it is already a clean keyword phrase.', {
       query: { type: 'string' }
     }, ['query']),
     schema('calculate', 'Safely evaluate a math expression.', {
@@ -351,6 +370,14 @@ export function toolSchemas({ allowed = ALL_TOOL_NAMES } = {}) {
     schema('timer_cancel', 'Cancel a client-side timer.', {
       id: { type: 'string' }
     }, ['id']),
+    schema('timer_adjust', 'Add or subtract time from a running client-side timer.', {
+      id: { type: 'string' },
+      deltaMs: { type: 'number' }
+    }, ['id', 'deltaMs']),
+    schema('timer_set', 'Set a running client-side timer to a new remaining duration.', {
+      id: { type: 'string' },
+      durationMs: { type: 'number' }
+    }, ['id', 'durationMs']),
     schema('timer_list', 'List client-side timers.', {}),
     schema('stopwatch_start', 'Start a client-side stopwatch.', {
       label: { type: 'string' }
@@ -472,10 +499,13 @@ class MathParser {
 
 function calculate({ expression }) {
   const result = new MathParser(expression).parse();
+  const displayResult = Number.isInteger(result) ? String(result) : String(Number(result.toPrecision(12)));
   return {
     expression,
     result,
-    text: `${expression} = ${Number.isInteger(result) ? result : Number(result.toPrecision(12))}`
+    displayResult,
+    equation: `${expression} = ${displayResult}`,
+    text: displayResult
   };
 }
 
@@ -751,6 +781,8 @@ async function executeBuiltIn(name, args, runtime, { signal } = {}) {
   }
   if (name === 'timer_start') return clientAction(name, 'timer_start', { durationMs: number(args.durationMs, 'durationMs'), label: args.label || 'Timer' }, `Started a timer for ${Math.round(number(args.durationMs, 'durationMs') / 1000)} seconds.`);
   if (name === 'timer_cancel') return clientAction(name, 'timer_cancel', { id: String(args.id || '') }, 'Cancelled the timer.');
+  if (name === 'timer_adjust') return clientAction(name, 'timer_adjust', { id: String(args.id || ''), deltaMs: number(args.deltaMs, 'deltaMs') }, 'Adjusted the timer.');
+  if (name === 'timer_set') return clientAction(name, 'timer_set', { id: String(args.id || ''), durationMs: number(args.durationMs, 'durationMs') }, 'Updated the timer.');
   if (name === 'timer_list') return clientAction(name, 'timer_list', {}, 'Listed timers.');
   if (name === 'stopwatch_start') return clientAction(name, 'stopwatch_start', { label: args.label || 'Stopwatch' }, 'Started a stopwatch.');
   if (name === 'stopwatch_stop') return clientAction(name, 'stopwatch_stop', { id: String(args.id || '') }, 'Stopped the stopwatch.');
@@ -772,10 +804,17 @@ function extractWeatherLocation(query) {
 }
 
 function extractExpression(query) {
-  const cleaned = String(query).replace(/what(?:'s| is)|calculate|compute|please|=/gi, ' ');
-  const match = cleaned.match(/[-+*/%^().\d\s\w]+/);
-  const expression = match?.[0]?.trim() || '';
-  return /[\d)]\s*[-+*/%^]\s*[\d(]/.test(expression) ? expression : '';
+  const cleaned = String(query)
+    .replace(/\b(?:what(?:'s|s| is)?|calculate|compute|solve|answer|please|equals?)\b|=/gi, ' ')
+    .replace(/[?!:;]/g, ' ');
+  const functionMatch = cleaned.match(/\b(?:sqrt|abs|round|floor|ceil|sin|cos|tan|log|ln)\s*\([^)]*\)/i);
+  if (functionMatch) return functionMatch[0].trim();
+  const candidates = cleaned.match(/(?:\d|\.\d|\()[\d\s+\-*/%^().]*(?:\d|\))/g) || [];
+  const expression = candidates
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => /[\d)]\s*[-+*/%^]\s*[\d(]/.test(candidate))
+    .sort((a, b) => b.length - a.length)[0] || '';
+  return expression;
 }
 
 function extractConversion(query) {
@@ -823,7 +862,55 @@ function extractRandomRange(query) {
   return { min: Number(match[1]), max: Number(match[2]) };
 }
 
-function fastToolCandidate(query) {
+function looksLikeWeatherLocation(query) {
+  const text = String(query || '').trim();
+  if (text.length < 2 || text.length > 90) return false;
+  if (/^(yes|yeah|yep|no|nah|use the tool|check it|do it|that one)$/i.test(text)) return false;
+  if (/[{}[\]<>]|https?:\/\//i.test(text)) return false;
+  if (/\b(weather|forecast|temperature|rain|snow|wind|tool|hallucinated)\b/i.test(text)) return false;
+  if (/\d+\s*[-+*/%^]\s*\d+/.test(text)) return false;
+  return /[a-z]/i.test(text) && (
+    /,/.test(text) ||
+    /\b\d{5}(?:-\d{4})?\b/.test(text) ||
+    /^[a-z][a-z .'-]+$/i.test(text)
+  );
+}
+
+function recentWeatherIntent(messages = []) {
+  const visible = (messages || []).filter((message) => ['user', 'assistant'].includes(message?.role)).slice(-8);
+  return visible.some((message) => {
+    const content = String(message.content || '');
+    return /\b(weather|forecast|temperature|rain|snow|wind)\b/i.test(content)
+      || /what location should i check the weather/i.test(content);
+  });
+}
+
+function latestWeatherLocationFromContext(messages = []) {
+  const visible = (messages || []).filter((message) => message?.role === 'user').slice(0, -1).reverse();
+  return visible.find((message) => looksLikeWeatherLocation(message.content))?.content?.trim() || '';
+}
+
+function weatherFollowupLocation(query, messages = []) {
+  const text = String(query || '').trim();
+  if (!recentWeatherIntent(messages)) return '';
+  if (looksLikeWeatherLocation(text)) return text;
+  if (/^(use|run|call|try)\s+(the\s+)?(weather\s+)?tool\b|^check it\b|^do it\b/i.test(text)) {
+    return latestWeatherLocationFromContext(messages);
+  }
+  return '';
+}
+
+function latestActiveTimer(state = {}) {
+  return [...(state.timers || [])].reverse().find((timer) => timer?.status === 'active') || null;
+}
+
+function latestStopwatch(state = {}, { running = null } = {}) {
+  return [...(state.stopwatches || [])].reverse().find((watch) => (
+    running == null ? watch : Boolean(watch?.running) === running
+  )) || null;
+}
+
+function fastToolCandidate(query, { messages = [], state = {} } = {}) {
   const text = String(query || '').trim();
   const lower = text.toLowerCase();
   if (/\b(weather|forecast|temperature|rain|snow|wind)\b/.test(lower)) {
@@ -831,8 +918,37 @@ function fastToolCandidate(query) {
     if (!location) return { name: 'get_weather', args: {}, missing: 'location', directText: 'What location should I check the weather for?' };
     return { name: 'get_weather', args: { location, days: /\bweek\b/.test(lower) ? 7 : 3 } };
   }
+  const weatherLocation = weatherFollowupLocation(text, messages);
+  if (weatherLocation) return { name: 'get_weather', args: { location: weatherLocation, days: 3 } };
+  if (/\b(open|show|bring up|launch)\b.{0,24}\bcalculator\b|\bcalculator\b.{0,24}\b(open|show|launch)\b/.test(lower)) {
+    return { name: 'calculate', args: { expression: '0' } };
+  }
   const durationMs = parseDurationMs(text);
+  if (/\btimer\b/.test(lower) && /\b(stop|cancel|end|clear)\b/.test(lower)) {
+    const timer = latestActiveTimer(state);
+    if (timer?.id) return { name: 'timer_cancel', args: { id: timer.id } };
+  }
+  if (/\btimer\b/.test(lower) && durationMs > 0 && /\b(add|extend|increase|longer|plus)\b/.test(lower)) {
+    const timer = latestActiveTimer(state);
+    if (timer?.id) return { name: 'timer_adjust', args: { id: timer.id, deltaMs: durationMs } };
+  }
+  if (/\btimer\b/.test(lower) && durationMs > 0 && /\b(remove|subtract|reduce|decrease|shorter|minus)\b/.test(lower)) {
+    const timer = latestActiveTimer(state);
+    if (timer?.id) return { name: 'timer_adjust', args: { id: timer.id, deltaMs: -durationMs } };
+  }
+  if (/\btimer\b/.test(lower) && durationMs > 0 && /\b(set|change|make)\b/.test(lower)) {
+    const timer = latestActiveTimer(state);
+    if (timer?.id) return { name: 'timer_set', args: { id: timer.id, durationMs } };
+  }
   if (/\btimer\b/.test(lower) && durationMs > 0) return { name: 'timer_start', args: { durationMs, label: text.replace(/^set\s+/i, '').trim() || 'Timer' } };
+  if (/\bstopwatch\b/.test(lower) && /\b(stop|pause|end)\b/.test(lower)) {
+    const watch = latestStopwatch(state, { running: true });
+    if (watch?.id) return { name: 'stopwatch_stop', args: { id: watch.id } };
+  }
+  if (/\bstopwatch\b/.test(lower) && /\b(reset|clear|zero)\b/.test(lower)) {
+    const watch = latestStopwatch(state);
+    if (watch?.id) return { name: 'stopwatch_reset', args: { id: watch.id } };
+  }
   if (/\b(stopwatch)\b.*\b(start|begin)\b|\b(start|begin)\b.*\bstopwatch\b/.test(lower)) return { name: 'stopwatch_start', args: { label: 'Stopwatch' } };
   if (/\buuid\b/.test(lower)) return { name: 'uuid_generate', args: { count: Number(lower.match(/\b(\d+)\b/)?.[1] || 1) } };
   if (/\bpassword\b/.test(lower) && /\b(generate|make|create)\b/.test(lower)) return { name: 'password_generate', args: { length: Number(lower.match(/\b(\d{2,3})\b/)?.[1] || 20) } };
@@ -893,9 +1009,9 @@ export function likelyNeedsPlanning(query) {
   return /\b(weather|forecast|search|look up|web|internet|calculate|convert|timer|stopwatch|uuid|hash|base64|json|color|password|random|pick|time|date)\b/i.test(String(query || ''));
 }
 
-export async function runFastTool(query, runtime, { toolsOptions, signal } = {}) {
+export async function runFastTool(query, runtime, { toolsOptions, signal, messages = [], state = {} } = {}) {
   if (!toolsOptions.enabled) return null;
-  const candidate = fastToolCandidate(query);
+  const candidate = fastToolCandidate(query, { messages, state });
   if (!candidate) return null;
   if (!toolsOptions.allowed.has(candidate.name)) return null;
   if (candidate.missing) {

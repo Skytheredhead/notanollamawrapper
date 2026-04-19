@@ -126,6 +126,7 @@ def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
             "processor": processor,
             "visionCache": VisionFeatureCache(),
             "promptCaches": {},
+            "generationLock": threading.RLock(),
         }
 
     from mlx_lm import load
@@ -138,6 +139,7 @@ def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
         "model": model,
         "tokenizer": tokenizer,
         "promptCaches": {},
+        "generationLock": threading.RLock(),
     }
 
 
@@ -261,6 +263,137 @@ def _prompt_cache_state(runtime: dict[str, Any], request: dict[str, Any]) -> tup
         "branchId": request.get("branchId"),
         "priorTokens": len(getattr(state, "token_ids", []) or []),
     }
+
+
+def _trim_vlm_cache_to_prefix(kv_cache: list[Any], prefix_len: int) -> None:
+    for cache_item in kv_cache:
+        if hasattr(cache_item, "keys") and cache_item.keys is not None:
+            cached_len = cache_item.keys.shape[2]
+            if cached_len > prefix_len:
+                cache_item.keys = cache_item.keys[:, :, :prefix_len, :]
+                cache_item.values = cache_item.values[:, :, :prefix_len, :]
+                if hasattr(cache_item, "offset"):
+                    cache_item.offset = prefix_len
+
+
+def _warm_vlm_prompt_cache(
+    runtime: dict[str, Any],
+    prompt: Any,
+    images: list[str],
+    options: dict[str, Any],
+    cache_request: dict[str, Any],
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    if images:
+        return {
+            "warmed": False,
+            "enabled": False,
+            "disabledReason": "images_not_supported_for_warm",
+        }
+
+    prompt_cache_state, cache_metrics = _prompt_cache_state(runtime, cache_request)
+    if prompt_cache_state is None:
+        return {
+            "warmed": False,
+            **cache_metrics,
+            "elapsedMs": round((time.monotonic() - started_at) * 1000, 3),
+        }
+
+    try:
+        import mlx.core as mx
+        from mlx_vlm.generate import generate_step
+        from mlx_vlm.models import cache
+        from mlx_vlm.utils import prepare_inputs
+
+        model = runtime["model"]
+        processor = runtime["processor"]
+        tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+        add_special_tokens = (
+            getattr(processor, "chat_template", None) is None
+            if model.config.model_type in ["gemma3", "gemma3n", "gemma4"]
+            else True
+        )
+        image_token_index = getattr(model.config, "image_token_index", None)
+        inputs = prepare_inputs(
+            processor,
+            images=None,
+            audio=None,
+            prompts=prompt,
+            image_token_index=image_token_index,
+            add_special_tokens=add_special_tokens,
+            **options,
+        )
+        input_ids = inputs.get("input_ids", None)
+        pixel_values = inputs.get("pixel_values", None)
+        mask = inputs.get("attention_mask", None)
+        data_kwargs = {
+            key: value
+            for key, value in inputs.items()
+            if key not in ["input_ids", "pixel_values", "attention_mask"]
+        }
+
+        full_token_ids = input_ids.flatten().tolist()
+        full_token_ids = [int(item) for item in full_token_ids]
+        prefix_len = 0
+        warm_kwargs = _generation_kwargs(options)
+        warm_kwargs.pop("enable_thinking", None)
+        warm_kwargs.pop("thinking_budget", None)
+        warm_kwargs["max_tokens"] = 0
+        warm_kwargs.update(data_kwargs)
+        with runtime.setdefault("generationLock", threading.RLock()):
+            tracked_cache = prompt_cache_state.cache
+            if tracked_cache is not None:
+                prefix_len = prompt_cache_state.find_prefix_length(full_token_ids)
+                if prefix_len >= len(full_token_ids):
+                    cache_metrics.update({
+                        "hit": True,
+                        "reusedTokens": prefix_len,
+                        "newTokens": 0,
+                        "promptTokens": len(full_token_ids),
+                        "elapsedMs": round((time.monotonic() - started_at) * 1000, 3),
+                        "warmed": True,
+                    })
+                    return cache_metrics
+                if prefix_len > 0:
+                    input_ids = input_ids[:, prefix_len:]
+                    _trim_vlm_cache_to_prefix(tracked_cache, prefix_len)
+
+            if tracked_cache is None:
+                tracked_cache = cache.make_prompt_cache(
+                    model.language_model,
+                    max_kv_size=options.get("max_kv_size", None),
+                )
+
+            for _token, _logprobs in generate_step(
+                input_ids,
+                model,
+                pixel_values,
+                mask,
+                prompt_cache=tracked_cache,
+                **warm_kwargs,
+            ):
+                pass
+            mx.eval([item.state for item in tracked_cache])
+            prompt_cache_state.update(full_token_ids, tracked_cache)
+        cache_metrics.update({
+            "hit": prefix_len > 0,
+            "reusedTokens": prefix_len,
+            "newTokens": max(0, len(full_token_ids) - prefix_len),
+            "promptTokens": len(full_token_ids),
+            "elapsedMs": round((time.monotonic() - started_at) * 1000, 3),
+            "warmed": True,
+            "tokenizer": getattr(tokenizer, "name_or_path", None),
+        })
+        return cache_metrics
+    except Exception as exc:
+        return {
+            "warmed": False,
+            "enabled": False,
+            "hit": False,
+            "disabledReason": f"warm_failed:{exc}",
+            "elapsedMs": round((time.monotonic() - started_at) * 1000, 3),
+            "key": cache_metrics.get("key"),
+        }
 
 
 def _idle_cleanup(*, min_idle_seconds: float = 0, include_pinned: bool = False) -> dict[str, Any]:
@@ -486,6 +619,61 @@ async def clear_prompt_cache(payload: dict[str, Any] | None = None) -> dict[str,
     return {"cleared": cleared}
 
 
+@app.post("/runtime/prompt-cache/warm")
+async def warm_prompt_cache(payload: dict[str, Any]) -> dict[str, Any]:
+    runtime = _load_runtime(str(payload.get("model") or DEFAULT_MODEL.name))
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    images = [str(item) for item in payload.get("images", []) if str(item).strip()]
+    prompt_messages = _message_payload(messages)
+    prompt = prompt_messages or str(payload.get("prompt") or "")
+    cache_request = _prompt_cache_request(payload, runtime, images)
+
+    if runtime.get("backend") != "vlm":
+        return {
+            "warmed": False,
+            "enabled": False,
+            "hit": False,
+            "disabledReason": "backend_unsupported",
+        }
+
+    from mlx_vlm.prompt_utils import apply_chat_template
+
+    template_started = time.monotonic()
+    templated_prompt = apply_chat_template(
+        runtime["processor"],
+        runtime["model"].config,
+        prompt,
+        num_images=len(images),
+        **_chat_template_kwargs(options),
+    )
+    chat_template_ms = round((time.monotonic() - template_started) * 1000, 3)
+    result = _warm_vlm_prompt_cache(runtime, templated_prompt, images, options, cache_request)
+    result.update({
+        "chatTemplateMs": chat_template_ms,
+        "promptChars": len(templated_prompt),
+        "source": payload.get("source") or None,
+    })
+    print(
+        "prompt-cache-warm",
+        _stable_json({
+            "model": runtime.get("modelName"),
+            "source": result.get("source"),
+            "enabled": result.get("enabled"),
+            "warmed": result.get("warmed"),
+            "hit": result.get("hit"),
+            "reusedTokens": result.get("reusedTokens"),
+            "newTokens": result.get("newTokens"),
+            "disabledReason": result.get("disabledReason"),
+            "elapsedMs": result.get("elapsedMs"),
+            "key": result.get("key"),
+        }),
+        file=sys.stderr,
+        flush=True,
+    )
+    return result
+
+
 @app.post("/runtime/idle-cleanup")
 async def runtime_idle_cleanup(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     include_pinned = bool((payload or {}).get("includePinned", False))
@@ -535,48 +723,49 @@ async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
                 kwargs = _generation_kwargs(options)
                 if runtime.get("visionCache") is not None:
                     kwargs["vision_cache"] = runtime["visionCache"]
-                prompt_cache_state, cache_metrics = _prompt_cache_state(runtime, cache_request)
-                prompt_tokens = None
-                if prompt_cache_state is not None:
-                    try:
-                        prompt_token_ids = _token_ids_for_prompt(processor, templated_prompt)
-                        prompt_tokens = len(prompt_token_ids)
-                        prefix_length = prompt_cache_state.find_prefix_length(prompt_token_ids)
-                        cache_metrics["hit"] = prefix_length > 0
-                        cache_metrics["reusedTokens"] = prefix_length
-                        cache_metrics["newTokens"] = max(0, len(prompt_token_ids) - prefix_length)
-                        kwargs["prompt_cache_state"] = prompt_cache_state
-                    except Exception as exc:
-                        cache_metrics = {
-                            "enabled": False,
-                            "hit": False,
-                            "disabledReason": f"tokenize_failed:{exc}",
-                        }
-                yield json.dumps({
-                    "type": "meta",
-                    "chatTemplateMs": chat_template_ms,
-                    "promptChars": len(templated_prompt),
-                    "promptTokens": prompt_tokens,
-                    "promptCache": cache_metrics,
-                }) + "\n"
-                print(
-                    "prompt-cache",
-                    _stable_json({
-                        "model": runtime.get("modelName"),
-                        "enabled": cache_metrics.get("enabled"),
-                        "hit": cache_metrics.get("hit"),
-                        "reusedTokens": cache_metrics.get("reusedTokens"),
-                        "newTokens": cache_metrics.get("newTokens"),
-                        "disabledReason": cache_metrics.get("disabledReason"),
-                        "key": cache_metrics.get("key"),
-                    }),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                for chunk in stream_generate(model, processor, templated_prompt, image=images or None, **kwargs):
-                    text = getattr(chunk, "text", "")
-                    if text:
-                        yield json.dumps({"type": "token", "delta": text}) + "\n"
+                with runtime.setdefault("generationLock", threading.RLock()):
+                    prompt_cache_state, cache_metrics = _prompt_cache_state(runtime, cache_request)
+                    prompt_tokens = None
+                    if prompt_cache_state is not None:
+                        try:
+                            prompt_token_ids = _token_ids_for_prompt(processor, templated_prompt)
+                            prompt_tokens = len(prompt_token_ids)
+                            prefix_length = prompt_cache_state.find_prefix_length(prompt_token_ids)
+                            cache_metrics["hit"] = prefix_length > 0
+                            cache_metrics["reusedTokens"] = prefix_length
+                            cache_metrics["newTokens"] = max(0, len(prompt_token_ids) - prefix_length)
+                            kwargs["prompt_cache_state"] = prompt_cache_state
+                        except Exception as exc:
+                            cache_metrics = {
+                                "enabled": False,
+                                "hit": False,
+                                "disabledReason": f"tokenize_failed:{exc}",
+                            }
+                    yield json.dumps({
+                        "type": "meta",
+                        "chatTemplateMs": chat_template_ms,
+                        "promptChars": len(templated_prompt),
+                        "promptTokens": prompt_tokens,
+                        "promptCache": cache_metrics,
+                    }) + "\n"
+                    print(
+                        "prompt-cache",
+                        _stable_json({
+                            "model": runtime.get("modelName"),
+                            "enabled": cache_metrics.get("enabled"),
+                            "hit": cache_metrics.get("hit"),
+                            "reusedTokens": cache_metrics.get("reusedTokens"),
+                            "newTokens": cache_metrics.get("newTokens"),
+                            "disabledReason": cache_metrics.get("disabledReason"),
+                            "key": cache_metrics.get("key"),
+                        }),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    for chunk in stream_generate(model, processor, templated_prompt, image=images or None, **kwargs):
+                        text = getattr(chunk, "text", "")
+                        if text:
+                            yield json.dumps({"type": "token", "delta": text}) + "\n"
             else:
                 from mlx_lm import stream_generate
 

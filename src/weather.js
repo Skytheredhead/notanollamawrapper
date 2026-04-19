@@ -37,6 +37,43 @@ function weatherCodeSummary(code) {
   return 'Unknown';
 }
 
+const US_STATE_NAMES = {
+  al: 'Alabama', ak: 'Alaska', az: 'Arizona', ar: 'Arkansas', ca: 'California',
+  co: 'Colorado', ct: 'Connecticut', de: 'Delaware', fl: 'Florida', ga: 'Georgia',
+  hi: 'Hawaii', id: 'Idaho', il: 'Illinois', in: 'Indiana', ia: 'Iowa',
+  ks: 'Kansas', ky: 'Kentucky', la: 'Louisiana', me: 'Maine', md: 'Maryland',
+  ma: 'Massachusetts', mi: 'Michigan', mn: 'Minnesota', ms: 'Mississippi',
+  mo: 'Missouri', mt: 'Montana', ne: 'Nebraska', nv: 'Nevada', nh: 'New Hampshire',
+  nj: 'New Jersey', nm: 'New Mexico', ny: 'New York', nc: 'North Carolina',
+  nd: 'North Dakota', oh: 'Ohio', ok: 'Oklahoma', or: 'Oregon', pa: 'Pennsylvania',
+  ri: 'Rhode Island', sc: 'South Carolina', sd: 'South Dakota', tn: 'Tennessee',
+  tx: 'Texas', ut: 'Utah', vt: 'Vermont', va: 'Virginia', wa: 'Washington',
+  wv: 'West Virginia', wi: 'Wisconsin', wy: 'Wyoming', dc: 'District of Columbia'
+};
+
+function locationCandidates(location) {
+  const query = String(location || '').trim().replace(/\s+/g, ' ');
+  const candidates = [query];
+  const stateMatch = query.match(/^(.+?)[,\s]+([a-z]{2})$/i);
+  if (stateMatch) {
+    const city = stateMatch[1].trim();
+    const state = US_STATE_NAMES[stateMatch[2].toLowerCase()];
+    if (state) {
+      candidates.push(`${city}, ${state}`);
+      candidates.push(city);
+    }
+  }
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function scorePlace(place, originalQuery) {
+  const query = String(originalQuery || '').toLowerCase();
+  const stateMatch = query.match(/^(.+?)[,\s]+([a-z]{2})$/i);
+  if (!stateMatch) return 0;
+  const expectedState = US_STATE_NAMES[stateMatch[2].toLowerCase()] || '';
+  return String(place.admin1 || '').toLowerCase() === expectedState.toLowerCase() ? 10 : 0;
+}
+
 export class WeatherClient {
   constructor({
     geocodeUrl,
@@ -76,14 +113,21 @@ export class WeatherClient {
     const cached = cacheGet(this.geocodeCache, cacheKey);
     if (cached) return { ...cached, cacheHit: true };
 
-    const url = new URL(this.geocodeUrl);
-    url.searchParams.set('name', query);
-    url.searchParams.set('count', '5');
-    url.searchParams.set('language', 'en');
-    url.searchParams.set('format', 'json');
+    let best = null;
+    for (const candidate of locationCandidates(query)) {
+      const url = new URL(this.geocodeUrl);
+      url.searchParams.set('name', candidate);
+      url.searchParams.set('count', '8');
+      url.searchParams.set('language', 'en');
+      url.searchParams.set('format', 'json');
 
-    const payload = await this.fetchJson(url, { signal });
-    const [best] = payload.results || [];
+      const payload = await this.fetchJson(url, { signal });
+      const results = payload.results || [];
+      best = results
+        .map((place) => ({ place, score: scorePlace(place, query) }))
+        .sort((a, b) => b.score - a.score)[0]?.place || null;
+      if (best) break;
+    }
     if (!best) throw new Error(`No weather location found for "${query}".`);
     const result = {
       name: best.name,

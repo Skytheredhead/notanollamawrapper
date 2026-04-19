@@ -13,7 +13,7 @@ export function useChat() {
     streamingContent, setStreamingContent, appendStreamingContent,
     isStreaming, setIsStreaming,
     streamController, setStreamController,
-    streamMetrics, startStreamMetrics, clearStreamMetrics,
+    streamMetrics, streamSearchStatus, setStreamSearchStatus, startStreamMetrics, clearStreamMetrics,
     queuedMessages, enqueueMessage, shiftQueuedMessage,
     input, setInput,
     currentPreSearchId, setCurrentPreSearchId,
@@ -67,6 +67,7 @@ export function useChat() {
     state: {
       timers: useStore.getState().timers,
       stopwatches: useStore.getState().stopwatches,
+      calculators: useStore.getState().calculators,
     },
   })
 
@@ -128,8 +129,15 @@ export function useChat() {
   }
 
   const handleToolEvent = (event) => {
+    if (event.event === 'search_status') {
+      setStreamSearchStatus(event.phase === 'searching' ? event : null)
+      return
+    }
     const card = toolEventToCard(event)
     if (card) addStreamToolCard(card)
+    if (event.event === 'tool_call_result' && event.name === 'calculate' && event.display?.calculator) {
+      useStore.getState().upsertCalculator(event.toolCallId, event.display.calculator)
+    }
     if (event.event === 'client_tool_action' && event.action) {
       const action = { ...event.action, toolCallId: event.toolCallId, toolName: event.name }
       applyClientToolAction(action)
@@ -218,6 +226,7 @@ export function useChat() {
     setIsStreaming(true)
     setStreamingContent('')
     clearStreamToolCards()
+    setStreamSearchStatus(null)
     startStreamMetrics()
 
     const ctrl = adapter.sendMessage(
@@ -337,6 +346,7 @@ export function useChat() {
     setIsStreaming(true)
     setStreamingContent('')
     clearStreamToolCards()
+    setStreamSearchStatus(null)
     startStreamMetrics()
     const ctrl = adapter.regenerate(
       state.currentChatId, state.selectedModel, { num_ctx: state.contextSize }, state.webSearchEnabled,
@@ -404,6 +414,7 @@ export function useChat() {
     setIsStreaming(true)
     setStreamingContent('')
     clearStreamToolCards()
+    setStreamSearchStatus(null)
     startStreamMetrics()
 
     const ctrl = adapter.editMessage(
@@ -468,7 +479,7 @@ export function useChat() {
     modelResidency, pendingAttachments, timers, stopwatches,
     chats, currentChatId,
     messages, streamingContent, isStreaming,
-    streamMetrics, streamToolCards, queuedMessages,
+    streamMetrics, streamSearchStatus, streamToolCards, queuedMessages,
     input, setInput,
     loadModels, loadChats, selectChat, newChat, unloadModels,
     sendMessage, stopGeneration, regenerate, editUserMessage, handleKeyDown,

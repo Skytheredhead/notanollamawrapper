@@ -62,6 +62,23 @@ const useStore = create(
           })(),
         })),
       clearStreamToolCards: () => set({ streamToolCards: [] }),
+      streamSearchStatus: null,
+      setStreamSearchStatus: (streamSearchStatus) => set({ streamSearchStatus }),
+      calculators: {},
+      upsertCalculator: (id, calculator) =>
+        set((s) => {
+          const key = id || `calculator${Date.now()}${Math.random().toString(36).slice(2)}`
+          return {
+            calculators: {
+              ...s.calculators,
+              [key]: {
+                id: key,
+                updatedAt: Date.now(),
+                ...calculator,
+              },
+            },
+          }
+        }),
       timers: [],
       stopwatches: [],
       applyClientToolAction: (action) =>
@@ -87,7 +104,36 @@ const useStore = create(
           if (action.action === 'timer_cancel') {
             return { timers: s.timers.map((timer) => timer.id === action.id ? { ...timer, status: 'cancelled' } : timer) }
           }
+          if (action.action === 'timer_adjust') {
+            const deltaMs = Number(action.deltaMs || 0)
+            return {
+              timers: s.timers.map((timer) => {
+                if (timer.id !== action.id || timer.status !== 'active') return timer
+                const targetAt = Math.max(now + 1000, timer.targetAt + deltaMs)
+                return {
+                  ...timer,
+                  targetAt,
+                  durationMs: Math.max(1000, timer.durationMs + deltaMs),
+                }
+              }),
+            }
+          }
+          if (action.action === 'timer_set') {
+            const durationMs = Math.max(1000, Number(action.durationMs || 0))
+            return {
+              timers: s.timers.map((timer) => timer.id === action.id
+                ? { ...timer, durationMs, createdAt: now, targetAt: now + durationMs, status: 'active' }
+                : timer),
+            }
+          }
           if (action.action === 'stopwatch_start') {
+            if (action.id) {
+              return {
+                stopwatches: s.stopwatches.map((watch) => watch.id === action.id && !watch.running
+                  ? { ...watch, startedAt: now, running: true }
+                  : watch),
+              }
+            }
             return {
               stopwatches: [
                 ...s.stopwatches,
@@ -215,7 +261,7 @@ const useStore = create(
         }),
       setStreamController: (c) => set({ streamController: c }),
       startStreamMetrics: () => set({ streamMetrics: { startedAt: performance.now(), firstTokenAt: null, tokens: 0, updatedAt: performance.now() } }),
-      clearStreamMetrics: () => set({ streamMetrics: null }),
+      clearStreamMetrics: () => set({ streamMetrics: null, streamSearchStatus: null }),
       enqueueMessage: (msg) =>
         set((s) => ({ queuedMessages: [...s.queuedMessages, { id: `q${Date.now()}${s.queuedMessages.length}`, ...msg }] })),
       shiftQueuedMessage: () => {

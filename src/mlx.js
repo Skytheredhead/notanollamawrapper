@@ -204,6 +204,37 @@ export class MlxClient {
     return response.json();
   }
 
+  async warmPromptCache({ model, messages, options, cache, source, signal } = {}) {
+    const images = imagePathsFromMessages(messages);
+    if (images.length) {
+      return {
+        warmed: false,
+        enabled: false,
+        disabledReason: 'images_not_supported_for_warm'
+      };
+    }
+    const targetModel = this.isMlxModel(model) ? (model || this.modelName) : this.modelName;
+    const response = await this.fetch(`${this.baseUrl}/runtime/prompt-cache/warm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: targetModel,
+        messages,
+        images,
+        options,
+        cache,
+        source
+      }),
+      signal
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      const message = messageFromErrorBody(body);
+      throw new MlxStreamError(`MLX prompt warm returned HTTP ${response.status}${message ? `: ${message}` : ''}`);
+    }
+    return response.json();
+  }
+
   async *streamChat({ model, messages, options, signal, cache }) {
     const images = imagePathsFromMessages(messages);
     const targetModel = this.isMlxModel(model) ? (model || this.modelName) : this.modelName;
@@ -349,6 +380,17 @@ export class HybridModelClient {
 
   async clearPromptCache(options = {}) {
     return this.mlx?.clearPromptCache?.(options) || null;
+  }
+
+  async warmPromptCache(request = {}) {
+    if (!this.mlx?.isMlxModel?.(request?.model)) {
+      return {
+        warmed: false,
+        enabled: false,
+        disabledReason: 'backend_unsupported'
+      };
+    }
+    return this.mlx.warmPromptCache(request);
   }
 
   backendForModel(model) {

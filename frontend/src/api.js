@@ -154,6 +154,38 @@ const realAdapter = {
     return r.json()
   },
 
+  async summarizeSourcesStream(sources = [], { signal, onSource } = {}) {
+    const r = await fetch(`${BASE}/sources/summarize?stream=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources }),
+      signal,
+    })
+    if (!r.ok) throw new Error(`summarizeSourcesStream: ${r.status}`)
+    const reader = r.body?.getReader()
+    if (!reader) throw new Error('summarizeSourcesStream: no body')
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (value) buffer += decoder.decode(value, { stream: !done })
+      let newline
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (!line) continue
+        const item = JSON.parse(line)
+        onSource?.(item)
+      }
+      if (done) break
+    }
+    const tail = buffer.trim()
+    if (tail) {
+      const item = JSON.parse(tail)
+      onSource?.(item)
+    }
+  },
+
   async listChats() {
     const r = await fetch(`${BASE}/chats`)
     if (!r.ok) throw new Error(`listChats: ${r.status}`)
@@ -207,7 +239,7 @@ const realAdapter = {
         if (!r.ok) throw new Error(`sendMessage: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search') {
+          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
             onToolEvent?.(chunk)
           }
           const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
@@ -246,7 +278,7 @@ const realAdapter = {
         if (!r.ok) throw new Error(`regenerate: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search') {
+          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
             onToolEvent?.(chunk)
           }
           const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''
@@ -282,7 +314,7 @@ const realAdapter = {
         if (!r.ok) throw new Error(`editMessage: ${r.status}`)
         for await (const chunk of readStream(r)) {
           if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
-          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search') {
+          if (chunk.event?.startsWith('tool_call') || chunk.event === 'client_tool_action' || chunk.event === 'web_search' || chunk.event === 'search_status') {
             onToolEvent?.(chunk)
           }
           const tok = chunk.delta ?? chunk.token ?? chunk.content ?? chunk.text ?? ''

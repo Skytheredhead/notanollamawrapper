@@ -85,6 +85,23 @@ const mockAdapter = {
     }
   },
 
+  async summarizeSourcesStream(sources = [], { signal, onSource } = {}) {
+    for (const source of sources) {
+      if (signal?.aborted) {
+        const err = new Error('Aborted')
+        err.name = 'AbortError'
+        throw err
+      }
+      await new Promise((resolve) => setTimeout(resolve, 140))
+      onSource?.({
+        ...source,
+        domain: source.domain || 'example.com',
+        faviconUrl: source.faviconUrl || '',
+        summary: source.summary || source.snippet || 'Mock source summary.',
+      })
+    }
+  },
+
   async listChats() {
     await sleep(40)
     return [...chats]
