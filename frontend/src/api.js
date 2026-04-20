@@ -1,6 +1,54 @@
 const BASE = import.meta.env.VITE_API_URL || '/api'
 const ROOT = BASE.replace(/\/api\/?$/, '')
 
+async function readErrorPayload(response) {
+  // Try to extract { error: { code, message, requestId, details } }.
+  const contentType = response.headers.get('content-type') || ''
+  try {
+    if (contentType.includes('application/json')) {
+      const j = await response.json()
+      if (j?.error) return j.error
+      if (j?.message || j?.code) return j
+    }
+  } catch { /* ignore */ }
+  try {
+    const text = await response.text()
+    if (!text) return null
+    try {
+      const j = JSON.parse(text)
+      if (j?.error) return j.error
+      if (j?.message || j?.code) return j
+    } catch { /* ignore */ }
+    return { message: text.slice(0, 800) }
+  } catch { /* ignore */ }
+  return null
+}
+
+function formatApiError(context, status, payload) {
+  const message = payload?.message || payload?.error || payload?.detail || null
+  const code = payload?.code || null
+  const requestId = payload?.requestId || null
+  const details = payload?.details || null
+  const bits = []
+  if (context) bits.push(context)
+  bits.push(`${status}`)
+  if (code) bits.push(code)
+  if (message) bits.push(message)
+  if (requestId) bits.push(`requestId=${requestId}`)
+  const err = new Error(bits.join(': '))
+  err.status = status
+  if (code) err.code = code
+  if (requestId) err.requestId = requestId
+  if (details) err.details = details
+  return err
+}
+
+async function assertOk(response, context = '') {
+  if (response.ok) return response
+  const payload = await readErrorPayload(response)
+  throw formatApiError(context, response.status, payload)
+}
+
 async function* readStream(response) {
   const reader = response.body.getReader()
   const dec = new TextDecoder()
@@ -46,7 +94,7 @@ const realAdapter = {
 
   async listModels() {
     const r = await fetch(`${BASE}/models`)
-    if (!r.ok) throw new Error(`listModels: ${r.status}`)
+    await assertOk(r, 'listModels')
     const d = await r.json()
     const models = Array.isArray(d) ? d : (d.models ?? [])
     return models.map((m) => typeof m === 'string' ? m : m.name).filter(Boolean)
@@ -57,38 +105,38 @@ const realAdapter = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
-    if (!r.ok) throw new Error(`unloadModels: ${r.status}`)
+    await assertOk(r, 'unloadModels')
     return r.json()
   },
 
   async stats(model) {
     const query = model ? `?model=${encodeURIComponent(model)}` : ''
     const r = await fetch(`${BASE}/stats${query}`)
-    if (!r.ok) throw new Error(`stats: ${r.status}`)
+    await assertOk(r, 'stats')
     return r.json()
   },
 
   async searchStatus() {
     const r = await fetch(`${BASE}/search/status`)
-    if (!r.ok) throw new Error(`searchStatus: ${r.status}`)
+    await assertOk(r, 'searchStatus')
     return r.json()
   },
 
   async startSearch() {
     const r = await fetch(`${BASE}/search/start`, { method: 'POST' })
-    if (!r.ok) throw new Error(`startSearch: ${r.status}`)
+    await assertOk(r, 'startSearch')
     return r.json()
   },
 
   async mlxStatus() {
     const r = await fetch(`${BASE}/mlx/status`)
-    if (!r.ok) throw new Error(`mlxStatus: ${r.status}`)
+    await assertOk(r, 'mlxStatus')
     return r.json()
   },
 
   async mlxPreflight() {
     const r = await fetch(`${BASE}/mlx/preflight`)
-    if (!r.ok) throw new Error(`mlxPreflight: ${r.status}`)
+    await assertOk(r, 'mlxPreflight')
     return r.json()
   },
 
@@ -97,19 +145,19 @@ const realAdapter = {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
     })
-    if (!r.ok) throw new Error(`mlxModelsStatus: ${r.status}`)
+    await assertOk(r, 'mlxModelsStatus')
     return r.json()
   },
 
   async startMlxRunner() {
     const r = await fetch(`${BASE}/mlx/start`, { method: 'POST' })
-    if (!r.ok) throw new Error(`startMlxRunner: ${r.status}`)
+    await assertOk(r, 'startMlxRunner')
     return r.json()
   },
 
   async stopMlxRunner() {
     const r = await fetch(`${BASE}/mlx/stop`, { method: 'POST' })
-    if (!r.ok) throw new Error(`stopMlxRunner: ${r.status}`)
+    await assertOk(r, 'stopMlxRunner')
     return r.json()
   },
 
@@ -119,7 +167,7 @@ const realAdapter = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ modelKey }),
     })
-    if (!r.ok) throw new Error(`startMlxModelDownload: ${r.status}`)
+    await assertOk(r, 'startMlxModelDownload')
     return r.json()
   },
 
@@ -128,13 +176,13 @@ const realAdapter = {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
     })
-    if (!r.ok) throw new Error(`mlxModelDownloadStatus: ${r.status}`)
+    await assertOk(r, 'mlxModelDownloadStatus')
     return r.json()
   },
 
   async openMlxModelsFolder() {
     const r = await fetch(`${BASE}/mlx/models/open-folder`, { method: 'POST' })
-    if (!r.ok) throw new Error(`openMlxModelsFolder: ${r.status}`)
+    await assertOk(r, 'openMlxModelsFolder')
     return r.json()
   },
 
@@ -152,7 +200,7 @@ const realAdapter = {
       }),
       signal,
     })
-    if (!r.ok) throw new Error(`preSearchAnalyze: ${r.status}`)
+    await assertOk(r, 'preSearchAnalyze')
     return r.json()
   },
 
@@ -162,7 +210,7 @@ const realAdapter = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sources }),
     })
-    if (!r.ok) throw new Error(`summarizeSources: ${r.status}`)
+    await assertOk(r, 'summarizeSources')
     return r.json()
   },
 
@@ -173,7 +221,7 @@ const realAdapter = {
       body: JSON.stringify({ sources }),
       signal,
     })
-    if (!r.ok) throw new Error(`summarizeSourcesStream: ${r.status}`)
+    await assertOk(r, 'summarizeSourcesStream')
     const reader = r.body?.getReader()
     if (!reader) throw new Error('summarizeSourcesStream: no body')
     const decoder = new TextDecoder()
@@ -200,7 +248,7 @@ const realAdapter = {
 
   async listChats() {
     const r = await fetch(`${BASE}/chats`)
-    if (!r.ok) throw new Error(`listChats: ${r.status}`)
+    await assertOk(r, 'listChats')
     const d = await r.json()
     return Array.isArray(d) ? d : (d.chats ?? [])
   },
@@ -211,14 +259,14 @@ const realAdapter = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, model }),
     })
-    if (!r.ok) throw new Error(`createChat: ${r.status}`)
+    await assertOk(r, 'createChat')
     const d = await r.json()
     return d.chat ?? d
   },
 
   async loadChat(id) {
     const r = await fetch(`${BASE}/chats/${id}`)
-    if (!r.ok) throw new Error(`loadChat: ${r.status}`)
+    await assertOk(r, 'loadChat')
     return r.json()
   },
 
@@ -228,7 +276,7 @@ const realAdapter = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ systemPrompt }),
     })
-    if (!r.ok) throw new Error(`setSystemPrompt: ${r.status}`)
+    await assertOk(r, 'setSystemPrompt')
     return r.json()
   },
 
@@ -266,7 +314,7 @@ const realAdapter = {
           body,
           signal: ctrl.signal,
         })
-        if (!r.ok) throw new Error(`sendMessage: ${r.status}`)
+        await assertOk(r, 'sendMessage')
         return r
       }
 
@@ -287,7 +335,11 @@ const realAdapter = {
                 }
                 break
               }
-              throw new Error(chunk.error.message || 'Generation failed')
+              const err = new Error(chunk.error.message || 'Generation failed')
+              if (chunk.error.code) err.code = chunk.error.code
+              if (chunk.error.requestId) err.requestId = chunk.error.requestId
+              if (chunk.error.details) err.details = chunk.error.details
+              throw err
             }
             if (
               chunk.event === 'generation_start' ||
@@ -333,9 +385,15 @@ const realAdapter = {
           }),
           signal: ctrl.signal,
         })
-        if (!r.ok) throw new Error(`regenerate: ${r.status}`)
+        await assertOk(r, 'regenerate')
         for await (const chunk of readStream(r)) {
-          if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
+          if (chunk.error) {
+            const err = new Error(chunk.error.message || 'Generation failed')
+            if (chunk.error.code) err.code = chunk.error.code
+            if (chunk.error.requestId) err.requestId = chunk.error.requestId
+            if (chunk.error.details) err.details = chunk.error.details
+            throw err
+          }
           if (
             chunk.event === 'generation_start' ||
             chunk.event?.startsWith('tool_call') ||
@@ -375,9 +433,15 @@ const realAdapter = {
           }),
           signal: ctrl.signal,
         })
-        if (!r.ok) throw new Error(`editMessage: ${r.status}`)
+        await assertOk(r, 'editMessage')
         for await (const chunk of readStream(r)) {
-          if (chunk.error) throw new Error(chunk.error.message || 'Generation failed')
+          if (chunk.error) {
+            const err = new Error(chunk.error.message || 'Generation failed')
+            if (chunk.error.code) err.code = chunk.error.code
+            if (chunk.error.requestId) err.requestId = chunk.error.requestId
+            if (chunk.error.details) err.details = chunk.error.details
+            throw err
+          }
           if (
             chunk.event === 'generation_start' ||
             chunk.event?.startsWith('tool_call') ||
@@ -403,7 +467,7 @@ const realAdapter = {
   async getDeepResearch(chatId) {
     const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research`)
     if (r.status === 404) return { phase: 'idle' }
-    if (!r.ok) throw new Error(`getDeepResearch: ${r.status}`)
+    await assertOk(r, 'getDeepResearch')
     return r.json()
   },
 
@@ -413,33 +477,25 @@ const realAdapter = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ topic }),
     })
-    if (!r.ok) {
-      let detail = r.statusText
-      try {
-        const j = await r.json()
-        detail = j?.error?.message || j?.error || detail
-      } catch { /* ignore */ }
-      throw new Error(detail || `startDeepResearch: ${r.status}`)
-    }
+    await assertOk(r, 'startDeepResearch')
     return r.json()
   },
 
   async stopDeepResearch(chatId) {
     const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research/stop`, { method: 'POST' })
-    if (!r.ok) throw new Error(`stopDeepResearch: ${r.status}`)
+    await assertOk(r, 'stopDeepResearch')
+    return r.json()
+  },
+
+  async stopAllDeepResearch() {
+    const r = await fetch(`${BASE}/deep-research/stop-all`, { method: 'POST' })
+    await assertOk(r, 'stopAllDeepResearch')
     return r.json()
   },
 
   async retryDeepResearch(chatId) {
     const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research/retry`, { method: 'POST' })
-    if (!r.ok) {
-      let detail = r.statusText
-      try {
-        const j = await r.json()
-        detail = j?.message || j?.reason || j?.error || detail
-      } catch { /* ignore */ }
-      throw new Error(detail || `retryDeepResearch: ${r.status}`)
-    }
+    await assertOk(r, 'retryDeepResearch')
     return r.json()
   },
 }

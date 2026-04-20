@@ -51,7 +51,8 @@ const DEFAULTS = {
   weatherProvider: 'open-meteo',
   weatherUnits: 'imperial',
   weatherGeocodeUrl: 'https://geocoding-api.open-meteo.com/v1/search',
-  weatherForecastUrl: 'https://api.open-meteo.com/v1/forecast'
+  weatherForecastUrl: 'https://api.open-meteo.com/v1/forecast',
+  debugErrors: true
 };
 
 function parsePort(value) {
@@ -189,6 +190,10 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     weatherUnits: env.NAOW_WEATHER_UNITS || DEFAULTS.weatherUnits,
     weatherGeocodeUrl: normalizeUrl(env.NAOW_WEATHER_GEOCODE_URL, DEFAULTS.weatherGeocodeUrl),
     weatherForecastUrl: normalizeUrl(env.NAOW_WEATHER_FORECAST_URL, DEFAULTS.weatherForecastUrl),
+    debugErrors: parseBoolean(
+      env.NAOW_DEBUG_ERRORS,
+      env.NODE_ENV ? env.NODE_ENV !== 'production' : DEFAULTS.debugErrors
+    ),
     toolsMdPath: path.resolve(cwd, env.NAOW_TOOLS_MD_PATH || 'tools.md'),
     mlxBaseUrl: normalizeUrl(env.NAOW_MLX_BASE_URL, DEFAULTS.mlxBaseUrl),
     mlxModel: env.NAOW_MLX_MODEL || DEFAULTS.mlxModel,

@@ -28,6 +28,8 @@ export function buildApp({
   });
 
   app.addHook('onRequest', (request, reply, done) => {
+    // Expose a request id to help correlate client-visible errors with backend logs.
+    reply.header('X-Request-Id', request.id);
     reply.header('Access-Control-Allow-Origin', config.corsOrigin);
     reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     reply.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -43,15 +45,27 @@ export function buildApp({
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ApiError) {
-      return sendError(reply, error.statusCode, error.code, error.message);
+      return sendError(reply, error.statusCode, error.code, error.message, {
+        requestId: request.id,
+        details: error.details || error.cause,
+        debugErrors: config.debugErrors
+      });
     }
 
     if (error.validation) {
-      return sendError(reply, 400, 'invalid_request', error.message);
+      return sendError(reply, 400, 'invalid_request', error.message, {
+        requestId: request.id,
+        details: error.validation,
+        debugErrors: config.debugErrors
+      });
     }
 
     request.log.error(error);
-    return sendError(reply, 500, 'internal_error', 'Unexpected backend error.');
+    return sendError(reply, 500, 'internal_error', 'Unexpected backend error.', {
+      requestId: request.id,
+      details: error,
+      debugErrors: config.debugErrors
+    });
   });
 
   registerRoutes(app, {

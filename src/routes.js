@@ -87,6 +87,16 @@ function streamErrorCode(error) {
   return 'ollama_stream_failed';
 }
 
+function debugErrorDetails(error) {
+  if (!error) return null;
+  if (error instanceof Error) return error.stack || error.message;
+  try {
+    return JSON.parse(JSON.stringify(error));
+  } catch {
+    return String(error);
+  }
+}
+
 function safeFilename(name) {
   const base = path.basename(String(name || 'image'));
   return base.replace(/[^a-zA-Z0-9._-]+/g, '_') || 'image';
@@ -1303,7 +1313,9 @@ async function streamAssistantReply({
       await writeSse(response, 'error', {
         error: {
           code: streamErrorCode(error),
-          message
+          message,
+          requestId: request.id,
+          details: config.debugErrors ? debugErrorDetails(error) : null
         }
       });
     }
@@ -1421,90 +1433,142 @@ export function registerRoutes(app, {
 
   app.get('/api/mlx/status', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       return await ollama.mlx.getVersion();
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.post('/api/mlx/start', async (request, reply) => {
     if (!mlxSidecar || typeof mlxSidecar.start !== 'function') {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be started from this backend.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be started from this backend.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       mlxSidecar.start();
       return { started: true };
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.post('/api/mlx/stop', async (request, reply) => {
     if (!mlxSidecar || typeof mlxSidecar.stop !== 'function') {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be stopped from this backend.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX sidecar cannot be stopped from this backend.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       mlxSidecar.stop();
       return { stopped: true };
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.get('/api/mlx/models/status', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     reply.header('Cache-Control', 'no-store');
     try {
       return await ollama.mlx.status();
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.get('/api/mlx/preflight', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       return await ollama.mlx.preflight();
     } catch (error) {
       const dbg = typeof mlxSidecar?.debugStatus === 'function' ? mlxSidecar.debugStatus() : null;
       const extra = dbg ? ` MLX sidecar: ${JSON.stringify(dbg)}` : '';
-      return sendError(reply, 503, 'mlx_unavailable', `${error.message}${extra}`);
+      return sendError(reply, 503, 'mlx_unavailable', `${error.message}${extra}`, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.post('/api/mlx/models/download', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       return await ollama.mlx.startModelDownload(request.body?.modelKey);
     } catch (error) {
-      return sendError(reply, 503, 'mlx_download_failed', error.message);
+      return sendError(reply, 503, 'mlx_download_failed', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.get('/api/mlx/models/download/status', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     reply.header('Cache-Control', 'no-store');
     try {
       return await ollama.mlx.modelDownloadStatus();
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
   app.post('/api/mlx/models/open-folder', async (request, reply) => {
     if (!ollama.mlx) {
-      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.');
+      return sendError(reply, 503, 'mlx_unavailable', 'MLX runner is not configured.', {
+        requestId: request.id,
+        debugErrors: config.debugErrors
+      });
     }
     try {
       const status = await ollama.mlx.status();
@@ -1514,7 +1578,11 @@ export function registerRoutes(app, {
       }
       return { opened: Boolean(modelsDir), path: modelsDir || '' };
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      return sendError(reply, 503, 'mlx_unavailable', error.message, {
+        requestId: request.id,
+        details: error,
+        debugErrors: config.debugErrors
+      });
     }
   });
 
@@ -1528,7 +1596,12 @@ export function registerRoutes(app, {
           reply,
           503,
           'ollama_unavailable',
-          `Could not reach Ollama at ${config.ollamaBaseUrl}`
+          `Could not reach Ollama at ${config.ollamaBaseUrl}`,
+          {
+            requestId: request.id,
+            details: error,
+            debugErrors: config.debugErrors
+          }
         );
       }
       throw unavailable('ollama_unavailable', `Could not reach Ollama at ${config.ollamaBaseUrl}`);
@@ -1555,7 +1628,12 @@ export function registerRoutes(app, {
           reply,
           503,
           'ollama_unavailable',
-          `Could not reach Ollama at ${config.ollamaBaseUrl}`
+          `Could not reach Ollama at ${config.ollamaBaseUrl}`,
+          {
+            requestId: request.id,
+            details: error,
+            debugErrors: config.debugErrors
+          }
         );
       }
       throw error;
@@ -1687,6 +1765,10 @@ export function registerRoutes(app, {
   });
 
   if (deepResearchManager) {
+    app.post('/api/deep-research/stop-all', async () => {
+      return deepResearchManager.stopAll('stop_all');
+    });
+
     app.get('/api/chats/:chatId/deep-research', async (request) => {
       const chat = resolveChat(db, request.params.chatId);
       const st = deepResearchManager.getStatus(chat.id);
@@ -1702,7 +1784,7 @@ export function registerRoutes(app, {
       const topic = requireString(body.topic);
       if (!topic) throw badRequest('missing_topic', 'Topic is required.');
       if (!searchClient) throw unavailable('search_unavailable', 'Search is not configured for deep research.');
-      const r = deepResearchManager.start({
+      const r = await deepResearchManager.start({
         chatId: chat.id,
         topic,
         db,
@@ -1710,7 +1792,7 @@ export function registerRoutes(app, {
         searchClient,
         config
       });
-      if (!r.ok) return reply.code(409).send(r);
+      if (!r.ok) return sendError(reply, 409, 'deep_research_in_progress', r.error || 'Deep research already running for this chat.');
       return { started: true };
     });
 

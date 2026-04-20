@@ -2120,6 +2120,7 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, cur
   const modelOptions = models.map((model) => [model, model])
   const [backendBusy, setBackendBusy] = useState(false)
   const [backendStatus, setBackendStatus] = useState({ online: true, message: '' })
+  const [deepResearchBusy, setDeepResearchBusy] = useState(false)
   const setError = useStore((s) => s.setError)
 
   useEffect(() => {
@@ -2240,6 +2241,24 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, cur
     }
   }
 
+  const stopAllDeepResearch = async () => {
+    if (deepResearchBusy) return
+    if (typeof adapter.stopAllDeepResearch !== 'function') {
+      setError('Stop-all deep research is not available.')
+      return
+    }
+    setDeepResearchBusy(true)
+    try {
+      const result = await adapter.stopAllDeepResearch()
+      const count = result?.count ?? 0
+      setError(count ? `Stopped ${count} deep research run${count === 1 ? '' : 's'}.` : 'No deep research runs were active.')
+    } catch (e) {
+      setError(e?.message || 'Stop-all failed.')
+    } finally {
+      setDeepResearchBusy(false)
+    }
+  }
+
   return (
     <div className="settingsWrap" ref={wrapRef}>
       <button className="iconButton settingsButton" onClick={() => setOpen((v) => !v)} aria-label="Settings">
@@ -2259,6 +2278,15 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, cur
             <div className="downloadChoices">
               <button type="button" onClick={startBackend} disabled={backendBusy || backendStatus.online}>Start</button>
               <button type="button" onClick={stopBackend} disabled={backendBusy || !backendStatus.online}>Stop</button>
+            </div>
+          </div>
+          <div className="settingsModelDownloads">
+            <span className="settingsModelDownloadsTitle">Deep research</span>
+            <small>Clears any running deep research jobs.</small>
+            <div className="downloadChoices">
+              <button type="button" onClick={stopAllDeepResearch} disabled={deepResearchBusy}>
+                {deepResearchBusy ? 'Stopping…' : 'Stop all'}
+              </button>
             </div>
           </div>
           <SelectControl id="context" label="Context" value={contextSize} onChange={(next) => setContextSize(Number(next))} options={CONTEXT_OPTIONS} {...selectProps} open={openSelect === 'context'} />
@@ -2769,6 +2797,14 @@ export default function App() {
       setDrWatchIds((ids) => (ids.includes(currentChatId) ? ids : [...ids, currentChatId]))
       return true
     } catch (e) {
+      // If a previous job is already running, don't show a raw "startDeepResearch: 409".
+      // Instead, start watching status for this chat and present a friendly message.
+      if (e?.status === 409 || String(e?.message || '').includes('startDeepResearch: 409')) {
+        setError('Deep research is already running for this chat.')
+        setDrWatchIds((ids) => (ids.includes(currentChatId) ? ids : [...ids, currentChatId]))
+        setDrStatusByChat((prev) => ({ ...prev, [currentChatId]: { ...prev[currentChatId], phase: 'running', topic } }))
+        return false
+      }
       setError(e?.message || String(e))
       return false
     }

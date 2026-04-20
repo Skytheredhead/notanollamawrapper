@@ -91,6 +91,7 @@ const idleGuard = new IdleResourceGuard({
 async function shutdown(signal) {
   idleGuard.stop();
   generationManager.stopAll('server_shutdown');
+  deepResearchManager?.stopAll?.('server_shutdown');
   await app.close();
   mlxSidecar.stop();
   await searchSidecar.stop();

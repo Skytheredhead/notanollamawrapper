@@ -24,7 +24,16 @@ export async function convertCurrency(
   }
   const url = `${BASE}/latest?amount=${encodeURIComponent(String(a))}&from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
   const r = await fetchImpl(url, { signal, headers: { Accept: 'application/json' } });
-  if (!r.ok) throw new Error(`Currency service: ${r.status}`);
+  if (!r.ok) {
+    let detail = '';
+    try {
+      const text = await r.text();
+      detail = text ? `: ${text.slice(0, 200)}` : '';
+    } catch {
+      detail = '';
+    }
+    throw new Error(`Currency service returned HTTP ${r.status}${detail}`);
+  }
   const data = await r.json();
   const result = Number(data?.rates?.[t]);
   if (!Number.isFinite(result)) throw new Error('Could not convert currency.');

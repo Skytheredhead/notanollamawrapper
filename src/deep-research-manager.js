@@ -62,6 +62,22 @@ export class DeepResearchManager {
     return true;
   }
 
+  stopAll(reason = 'user_request') {
+    let count = 0;
+    for (const [, job] of this.jobs) {
+      try {
+        job.abortController?.abort?.();
+      } catch { /* ignore */ }
+      job.phase = 'stopped';
+      job.error = null;
+      job.updatedAt = now();
+      job.stoppedReason = reason;
+      count += 1;
+    }
+    this.jobs.clear();
+    return { ok: true, count };
+  }
+
   /**
    * @returns {Promise<{ ok: boolean, error?: string }>}
    */
@@ -73,8 +89,20 @@ export class DeepResearchManager {
     searchClient,
     config
   }) {
-    if (this.jobs.get(chatId)?.phase === 'running') {
-      return { ok: false, error: 'Deep research already running for this chat.' };
+    const existing = this.jobs.get(chatId);
+    if (existing?.phase === 'running') {
+      // Auto-recover from stale "running" jobs (e.g. previous buggy early-return)
+      // by allowing a restart if no progress events have updated the job recently.
+      const staleAfterMs = 30_000;
+      const updatedAt = Number(existing.updatedAt || 0);
+      const isStale = updatedAt > 0 && now() - updatedAt > staleAfterMs;
+      if (!isStale) {
+        return { ok: false, error: 'Deep research already running for this chat.' };
+      }
+      try {
+        existing.abortController?.abort?.();
+      } catch { /* ignore */ }
+      this.jobs.delete(chatId);
     }
 
     const abortController = new AbortController();
@@ -159,6 +187,7 @@ export class DeepResearchManager {
       }
     })();
 
+    // Return immediately; runner executes in background.
     return { ok: true };
   }
 }
