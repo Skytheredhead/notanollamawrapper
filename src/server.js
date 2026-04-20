@@ -10,8 +10,10 @@ import { WebSearchClient } from './web-search.js';
 import { PreSearchManager } from './presearch-manager.js';
 import { SourceSummaryCache } from './source-summaries.js';
 import { DeepResearchManager } from './deep-research-manager.js';
+import { createLogger } from './logger.js';
 
 const config = loadConfig();
+const logger = createLogger({ filePath: `${config.dataDir}/logs/backend.log` });
 const db = new LocalDatabase(config.dbPath);
 const generationManager = new GenerationManager();
 const mlxPort = new URL(config.mlxBaseUrl).port || '5055';
@@ -20,7 +22,8 @@ const mlxSidecar = new MlxSidecar({
   cwd: process.cwd(),
   port: Number.parseInt(mlxPort, 10),
   autostart: config.mlxAutostart,
-  home: config.dataDir
+  home: config.dataDir,
+  logger
 });
 mlxSidecar.start();
 const mlx = new MlxClient({
@@ -47,6 +50,7 @@ const searchSidecar = new SearxngSidecar({
   timeoutMs: Math.min(config.searchTimeoutMs, 1500),
   setupTimeoutMs: config.searchSetupTimeoutMs
 });
+searchSidecar.setLogger?.(logger);
 const searchClient = new WebSearchClient({
   config,
   sidecar: searchSidecar
@@ -102,23 +106,31 @@ process.on('SIGTERM', () => {
   shutdown('SIGTERM').finally(() => process.exit(0));
 });
 
+process.on('uncaughtException', (error) => {
+  logger.error('uncaughtException', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('unhandledRejection', reason);
+});
+
 try {
   await app.listen({
     host: config.host,
     port: config.port
   });
   idleGuard.start();
-  console.log(`naow backend listening on http://${config.host}:${config.port}`);
-  console.log(`SQLite database: ${config.dbPath}`);
-  console.log(`MLX URL: ${config.mlxBaseUrl}`);
-  console.log(`Ollama fallback URL: ${config.ollamaBaseUrl}`);
-  console.log(`Local search URL: ${config.searchUrl}`);
-  console.log(`Local search home: ${config.searchHome}`);
+  logger.info(`naow backend listening on http://${config.host}:${config.port}`);
+  logger.info(`SQLite database: ${config.dbPath}`);
+  logger.info(`MLX URL: ${config.mlxBaseUrl}`);
+  logger.info(`Ollama fallback URL: ${config.ollamaBaseUrl}`);
+  logger.info(`Local search URL: ${config.searchUrl}`);
+  logger.info(`Local search home: ${config.searchHome}`);
   searchClient.warmup().catch((error) => {
-    console.warn(`Local search warmup skipped: ${error.message}`);
+    logger.warn('Local search warmup skipped:', error);
   });
 } catch (error) {
-  console.error(error);
+  logger.error('startup_failed', error);
   idleGuard.stop();
   mlxSidecar.stop();
   db.close();

@@ -2461,8 +2461,7 @@ button, input, textarea, select { font: inherit; }
   width: 100%;
   margin: 0;
   grid-column: 1;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) max-content;
+  display: flex;
   gap: 12px;
   align-items: center;
   background: color-mix(in srgb, var(--surface-strong) 72%, transparent);
@@ -2630,6 +2629,32 @@ button, input, textarea, select { font: inherit; }
   cursor: pointer;
 }
 
+.deepResearchInline {
+  width: min(920px, 100%);
+  margin: 0 auto 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
+}
+
+.deepResearchInlineTitle {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.deepResearchInlinePause {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
 .deepResearchStart {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
   background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -2649,6 +2674,143 @@ button, input, textarea, select { font: inherit; }
 .deepResearchPause {
   flex: 1 1 200px;
   min-width: 0;
+}
+
+.attachmentFileIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.researchButton {
+  position: relative;
+}
+
+.researchButton.isActive {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--ink);
+}
+
+.vibeTooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%) translateY(6px);
+  padding: 6px 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+  backdrop-filter: blur(18px) saturate(1.05);
+}
+
+.researchButton:hover .vibeTooltip,
+.researchButton:focus-visible .vibeTooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.stopButton {
+  width: 40px;
+  height: 40px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+}
+
+.stopButton:hover,
+.stopButton:focus-visible {
+  color: var(--ink);
+  border-color: color-mix(in srgb, #d84a4a 38%, var(--line));
+}
+
+.isGlobalDropping .composerShell {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent), var(--shadow);
+}
+
+.shareMenuWrap {
+  position: relative;
+}
+
+.shareMenuCard {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 220px;
+  padding: 10px;
+  border-radius: calc(var(--radius) + 2px);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(1.05);
+  display: grid;
+  gap: 8px;
+  z-index: 70;
+}
+
+.shareMenuCard button {
+  width: 100%;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.shareMenuCard button:hover,
+.shareMenuCard button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.shareMenuCard small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsSystemPrompt {
+  margin-top: 10px;
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.messageAttachmentFile {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 80%, transparent);
+  color: var(--ink);
+  font-size: 13px;
 }
 
 .topRightHud {
@@ -2863,6 +3025,7 @@ button, input, textarea, select { font: inherit; }
 .composer textarea {
   width: 100%;
   min-width: 0;
+  flex: 1 1 auto;
   min-height: 46px;
   max-height: 138px;
   display: block;
@@ -2880,6 +3043,7 @@ button, input, textarea, select { font: inherit; }
   gap: 8px;
   width: auto;
   align-self: stretch;
+  flex: 0 0 auto;
 }
 
 .sendButton {
@@ -3364,7 +3528,6 @@ pre {
 
   .composerShell {
     grid-column: 1;
-    grid-template-columns: 30px minmax(0, 1fr) max-content;
     gap: 9px;
     padding: 0 0 6px;
   }

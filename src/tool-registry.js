@@ -30,7 +30,8 @@ const LOCAL_TOOL_NAMES = new Set([
   'stopwatch_start',
   'stopwatch_stop',
   'stopwatch_reset',
-  'stopwatch_list'
+  'stopwatch_list',
+  'set_system_prompt'
 ]);
 
 const ALL_TOOL_NAMES = new Set(['get_weather', 'web_search', ...LOCAL_TOOL_NAMES]);
@@ -72,7 +73,8 @@ function labelForTool(name) {
     stopwatch_start: 'Stopwatch',
     stopwatch_stop: 'Stopwatch',
     stopwatch_reset: 'Stopwatch',
-    stopwatch_list: 'Stopwatches'
+    stopwatch_list: 'Stopwatches',
+    set_system_prompt: 'System prompt'
   }[name] || name;
 }
 
@@ -439,6 +441,9 @@ export function toolSchemas({ allowed = ALL_TOOL_NAMES } = {}) {
       places: { type: 'array', items: { type: 'string' } },
       query: { type: 'string' }
     }),
+    schema('set_system_prompt', 'Update this chat’s system prompt. Use this when the user asks to change the system prompt or wants persistent behavior changes. Provide the full new prompt text.', {
+      prompt: { type: 'string' }
+    }, ['prompt']),
     schema('get_sports', 'Scores, standings, team lookup, or player search (ESPN public JSON).', {
       action: { type: 'string', enum: ['scores', 'standings', 'schedule', 'team', 'player'] },
       league: { type: 'string' },
@@ -770,6 +775,10 @@ function extractSportsFast(query) {
 }
 
 async function executeBuiltIn(name, args, runtime, { signal } = {}) {
+  if (name === 'set_system_prompt') {
+    const prompt = String(args?.prompt ?? '').trim();
+    return clientAction(name, 'system_prompt_set', { prompt }, 'System prompt updated.');
+  }
   if (name === 'get_weather') {
     const result = await runtime.weatherClient.forecast({
       location: args.location,

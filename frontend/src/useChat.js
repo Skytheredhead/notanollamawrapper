@@ -147,6 +147,14 @@ export function useChat() {
     if (event.event === 'client_tool_action' && event.action) {
       const action = { ...event.action, toolCallId: event.toolCallId, toolName: event.name }
       applyClientToolAction(action)
+      if (action.action === 'system_prompt_set' && typeof adapter.setSystemPrompt === 'function') {
+        const prompt = String(action.prompt ?? '').trim()
+        if (useStore.getState().currentChatId && prompt) {
+          adapter.setSystemPrompt(useStore.getState().currentChatId, prompt)
+            .then(() => adapter.loadChat(useStore.getState().currentChatId).then(({ messages: ms }) => setMessagesForChat(useStore.getState().currentChatId, ms ?? [])).catch(() => {}))
+            .catch((e) => setError(e?.message || 'System prompt update failed.'))
+        }
+      }
     }
   }
 

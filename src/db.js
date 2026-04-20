@@ -246,6 +246,9 @@ export class LocalDatabase {
       getChat: this.db.prepare('SELECT * FROM chats WHERE id = ?'),
       getChatBySlug: this.db.prepare('SELECT * FROM chats WHERE slug = ?'),
       touchChat: this.db.prepare('UPDATE chats SET updated_at = ? WHERE id = ?'),
+      updateChatSystemPrompt: this.db.prepare(`
+        UPDATE chats SET system_prompt = @systemPrompt, updated_at = @updatedAt WHERE id = @id
+      `),
       setChatModelIfEmpty: this.db.prepare(`
         UPDATE chats SET model = ?, updated_at = ? WHERE id = ? AND model IS NULL
       `),
@@ -470,6 +473,16 @@ export class LocalDatabase {
     return result.changes > 0;
   }
 
+  updateChatSystemPrompt(chatId, systemPrompt) {
+    const value = String(systemPrompt ?? '').trim();
+    const result = this.statements.updateChatSystemPrompt.run({
+      id: chatId,
+      systemPrompt: value || null,
+      updatedAt: this.now()
+    });
+    return result.changes > 0;
+  }
+
   listChats({ limit = 50, cursor = null } = {}) {
     const safeLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 50, 1), 100);
     const queryLimit = safeLimit + 1;
@@ -538,10 +551,17 @@ export class LocalDatabase {
     return messages;
   }
 
-  createUserMessage(chatId, content) {
+  createUserMessage(chatId, content, { id = null } = {}) {
     const timestamp = this.now();
+    if (id) {
+      const existing = this.statements.getMessage.get(id);
+      if (existing) {
+        const msg = rowToMessage(existing);
+        if (msg?.chatId === chatId && msg?.role === 'user') return msg;
+      }
+    }
     const message = {
-      id: randomUUID(),
+      id: id || randomUUID(),
       chatId,
       role: 'user',
       content,
@@ -562,8 +582,15 @@ export class LocalDatabase {
     return message;
   }
 
-  createUserMessageWithAttachments(chatId, content, attachments = []) {
-    const message = this.createUserMessage(chatId, content);
+  createUserMessageWithAttachments(chatId, content, attachments = [], { id = null } = {}) {
+    const existed = Boolean(id && this.statements.getMessage.get(id));
+    const message = this.createUserMessage(chatId, content, { id });
+    if (existed) {
+      return {
+        ...message,
+        attachments: this.statements.getContextAttachments.all(message.id).map(rowToAttachment)
+      };
+    }
     for (const attachment of attachments) {
       this.createAttachment({
         ...attachment,

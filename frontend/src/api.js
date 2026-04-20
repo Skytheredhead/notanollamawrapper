@@ -222,8 +222,19 @@ const realAdapter = {
     return r.json()
   },
 
+  async setSystemPrompt(chatId, systemPrompt) {
+    const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/system-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemPrompt }),
+    })
+    if (!r.ok) throw new Error(`setSystemPrompt: ${r.status}`)
+    return r.json()
+  },
+
   sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError, tools, onToolEvent, preSearchId = null, searchStrategy = 'normal') {
     const ctrl = new AbortController()
+    const clientMessageId = (globalThis.crypto?.randomUUID?.() || `cmsg_${Date.now()}_${Math.random().toString(36).slice(2)}`)
     ;(async () => {
       const isBackendOfflineError = (error) => {
         const code = String(error?.code || '')
@@ -237,6 +248,7 @@ const realAdapter = {
         if (attachments?.length) {
           body = new FormData()
           body.append('content', content)
+          body.append('clientMessageId', clientMessageId)
           body.append('model', model || '')
           body.append('options', JSON.stringify(options || {}))
           body.append('webSearch', String(webSearch))
@@ -246,7 +258,7 @@ const realAdapter = {
           attachments.forEach((attachment) => body.append('attachments', attachment.file, attachment.name))
         } else {
           headers = { 'Content-Type': 'application/json' }
-          body = JSON.stringify({ content, model, options, webSearch, tools: tools || { enabled: true }, preSearchId, searchStrategy })
+          body = JSON.stringify({ content, clientMessageId, model, options, webSearch, tools: tools || { enabled: true }, preSearchId, searchStrategy })
         }
         const r = await fetch(`${BASE}/chats/${chatId}/messages`, {
           method: 'POST',

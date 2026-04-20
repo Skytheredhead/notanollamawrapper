@@ -595,6 +595,41 @@ async function withWebSearchContext({ searchClient, preSearchManager, config, me
   const query = latestUserQuery(messages).trim();
   if (!query) return { messages, used: false };
 
+  const isObviouslyNonSearchQuery = (text) => {
+    const t = String(text || '').trim().toLowerCase();
+    if (!t) return true;
+    if (t.length <= 3) return true;
+    if (/^(yo|yoo+|sup|suh|hey|hi|hello|hiya|howdy)\b/.test(t)) return true;
+    if (/^what'?s\s+up\b/.test(t)) return true;
+    if (/^(thanks|thx|ok|okay|k|lol|lmao|nice|cool)\b/.test(t)) return true;
+    if (/^(why|how)\b.*\bsearch\b/.test(t)) return true;
+    if (/\b(did you|why did you)\b.*\bsearch\b/.test(t)) return true;
+    const words = t.split(/\s+/).filter(Boolean);
+    const hasDigit = /\d/.test(t);
+    const hasUrl = /\bhttps?:\/\//.test(t) || /\bwww\./.test(t);
+    const hasQuestionWord = /\b(who|what|when|where|why|how|which)\b/.test(t);
+    if (!hasUrl && !hasDigit && words.length <= 4 && !hasQuestionWord) return true;
+    return false;
+  };
+
+  if (searchMode !== 'extra' && isObviouslyNonSearchQuery(query)) {
+    return {
+      messages,
+      used: false,
+      attempted: false,
+      sources: [],
+      event: {
+        used: false,
+        provider: config.searchProvider,
+        skipped: 'obviously_not_needed',
+        message: 'Search was not needed.',
+        elapsedMs: 0,
+        searchMode,
+        searchStrategy
+      }
+    };
+  }
+
   const classifierDraft = buildSearchClassifierDraft(messages) || query;
 
   const consumed = preSearchManager?.consume?.({ preSearchId, chatId, finalQuery: query });
@@ -1438,7 +1473,9 @@ export function registerRoutes(app, {
     try {
       return await ollama.mlx.preflight();
     } catch (error) {
-      return sendError(reply, 503, 'mlx_unavailable', error.message);
+      const dbg = typeof mlxSidecar?.debugStatus === 'function' ? mlxSidecar.debugStatus() : null;
+      const extra = dbg ? ` MLX sidecar: ${JSON.stringify(dbg)}` : '';
+      return sendError(reply, 503, 'mlx_unavailable', `${error.message}${extra}`);
     }
   });
 
@@ -1641,6 +1678,14 @@ export function registerRoutes(app, {
     };
   });
 
+  app.post('/api/chats/:chatId/system-prompt', async (request) => {
+    const chat = resolveChat(db, request.params.chatId);
+    const body = request.body || {};
+    const systemPrompt = typeof body?.systemPrompt === 'string' ? body.systemPrompt : '';
+    db.updateChatSystemPrompt(chat.id, systemPrompt);
+    return { chat: db.getChat(chat.id) };
+  });
+
   if (deepResearchManager) {
     app.get('/api/chats/:chatId/deep-research', async (request) => {
       const chat = resolveChat(db, request.params.chatId);
@@ -1698,6 +1743,7 @@ export function registerRoutes(app, {
     let attachmentsPersisted = false;
     try {
       const content = requireString(body.content);
+      const clientMessageId = requireString(body.clientMessageId) || null;
       if (!content && !attachments.length) {
         throw badRequest('empty_message', 'Message content is required.');
       }
@@ -1712,15 +1758,8 @@ export function registerRoutes(app, {
         throw conflict('generation_in_progress', 'This chat already has an active generation.');
       }
 
-      db.createUserMessageWithAttachments(chat.id, content || '', attachments);
+      db.createUserMessageWithAttachments(chat.id, content || '', attachments, { id: clientMessageId });
       attachmentsPersisted = true;
-      void maybeAutoTitleChatFromFirstUserMessage({
-        db,
-        ollama,
-        config,
-        chatId: chat.id,
-        userContent: content || ''
-      }).catch(() => {});
       const refreshedChat = db.getChat(chat.id);
       const { entry, assistantMessage } = createGeneration({
         db,
@@ -1757,6 +1796,16 @@ export function registerRoutes(app, {
         searchClient,
         preSearchManager
       });
+
+      // Auto-title after the first message completes to avoid concurrent MLX calls
+      // that can destabilize the MLX runner on some setups.
+      void maybeAutoTitleChatFromFirstUserMessage({
+        db,
+        ollama,
+        config,
+        chatId: chat.id,
+        userContent: content || ''
+      }).catch(() => {});
     } catch (error) {
       if (!attachmentsPersisted) cleanupSavedAttachments(attachments);
       throw error;

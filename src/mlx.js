@@ -436,19 +436,38 @@ export class HybridModelClient {
 }
 
 export class MlxSidecar {
-  constructor({ python, cwd, port = 5055, autostart = true, home = null }) {
+  constructor({ python, cwd, port = 5055, autostart = true, home = null, logger = null }) {
     this.python = python;
     this.cwd = cwd;
     this.port = port;
     this.autostart = autostart;
     this.home = home;
+    this.logger = logger;
     this.process = null;
+    this.lastExit = null;
+    this.stderrTail = [];
   }
 
   start() {
     if (!this.autostart || this.process) return;
     if (!fs.existsSync(this.python)) return;
-    this.process = spawn(this.python, ['-m', 'mlx_runner.server', '--port', String(this.port)], {
+    const safeWrite = (stream, text) => {
+      try {
+        if (!stream?.write) return;
+        stream.write(text);
+      } catch {
+        // Avoid crashing the backend if stdout/stderr is closed (EPIPE),
+        // which can happen when launched under certain GUI/host environments.
+      }
+    };
+    const looksLikeMacPythonApp = /Python\.app\/Contents\/MacOS\/Python$/i.test(this.python);
+    const pythonBin = looksLikeMacPythonApp ? 'python3' : this.python;
+    if (looksLikeMacPythonApp) {
+      this.logger?.warn?.('[mlx] NAOW_MLX_PYTHON points to Python.app; using python3 instead to avoid macOS crash dialogs.', {
+        configured: this.python
+      });
+    }
+    this.process = spawn(pythonBin, ['-m', 'mlx_runner.server', '--port', String(this.port)], {
       cwd: this.cwd,
       env: {
         ...process.env,
@@ -457,9 +476,24 @@ export class MlxSidecar {
       },
       stdio: ['ignore', 'pipe', 'pipe']
     });
-    this.process.stdout?.on('data', (chunk) => process.stdout.write(`[mlx] ${chunk}`));
-    this.process.stderr?.on('data', (chunk) => process.stderr.write(`[mlx] ${chunk}`));
-    this.process.on('exit', () => {
+    this.process.on('error', (error) => {
+      this.logger?.error?.('[mlx] spawn error', error);
+      safeWrite(process.stderr, `[mlx] spawn error: ${error?.message || String(error)}\n`);
+      this.process = null;
+    });
+    this.process.stdout?.on('data', (chunk) => safeWrite(process.stdout, `[mlx] ${chunk}`));
+    this.process.stderr?.on('data', (chunk) => {
+      const text = String(chunk || '');
+      this.stderrTail.push(text);
+      if (this.stderrTail.length > 40) this.stderrTail = this.stderrTail.slice(-40);
+      safeWrite(process.stderr, `[mlx] ${chunk}`);
+    });
+    this.process.on('exit', (code, signal) => {
+      this.lastExit = { code, signal, at: Date.now() };
+      if (code || signal) {
+        this.logger?.warn?.('[mlx] exited', { code, signal });
+        if (this.stderrTail.length) this.logger?.warn?.('[mlx] stderr tail', this.stderrTail.slice(-12).join(''));
+      }
       this.process = null;
     });
   }
@@ -468,5 +502,13 @@ export class MlxSidecar {
     if (!this.process) return;
     this.process.kill('SIGTERM');
     this.process = null;
+  }
+
+  debugStatus() {
+    return {
+      running: Boolean(this.process),
+      lastExit: this.lastExit,
+      stderrTail: this.stderrTail.slice(-12)
+    };
   }
 }

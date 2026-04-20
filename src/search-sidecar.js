@@ -49,6 +49,11 @@ export class NativeSearxngSidecar {
     this.starting = null;
     this.settingUp = null;
     this.lastStatus = null;
+    this.logger = null;
+  }
+
+  setLogger(logger) {
+    this.logger = logger;
   }
 
   get sourceDir() {
@@ -137,6 +142,13 @@ export class NativeSearxngSidecar {
         stdio: 'ignore',
         detached: false
       });
+      if (typeof child?.on === 'function') {
+        child.on('error', (error) => {
+          this.logger?.error?.('[search] spawn error', error);
+          this.lastStatus = { ready: false, state: 'unavailable', message: error?.message || 'Local search failed to start.' };
+          if (this.process === child) this.process = null;
+        });
+      }
       child.unref?.();
       this.process = child;
       child.once('exit', () => {

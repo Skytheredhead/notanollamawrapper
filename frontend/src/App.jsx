@@ -154,7 +154,6 @@ function metricsText(metrics, now, streaming = false) {
       parts.push(`prompt ${formatMetric(metrics.promptBuildMs)}`)
     }
     if (metrics.webSearch?.used && Number(metrics.webSearchMs) > 0) parts.push(`search ${formatMetric(metrics.webSearchMs)}`)
-    if (Number(metrics.webSearch?.classifierMs) > 250) parts.push(`gate ${formatMetric(metrics.webSearch.classifierMs)}`)
     parts.push(`total ${formatMetric(metrics.generationMs)}`)
     return parts.join(' · ')
   }
@@ -1818,6 +1817,16 @@ function IconSettingsSliders() {
   )
 }
 
+function IconShare() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 9 10 5 6 9" />
+      <path d="M10 5v10" />
+      <path d="M6 19h12" />
+    </svg>
+  )
+}
+
 function ChatSearchPanel({ chats, onSelect, onClose, autoFocus }) {
   const inputRef = useRef(null)
   const [query, setQuery] = useState('')
@@ -1852,7 +1861,12 @@ function ChatSearchPanel({ chats, onSelect, onClose, autoFocus }) {
 
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    if (!needle) return []
+    if (!needle) {
+      return [...(chats || [])]
+        .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
+        .slice(0, 14)
+        .map((chat) => ({ chat, preview: chat.lastMessagePreview || chat.title || '' }))
+    }
     return index.flatMap(({ chat, messages }) => {
       const matches = []
       if (chat.title?.toLowerCase().includes(needle)) matches.push({ chat, preview: chat.title })
@@ -1866,7 +1880,7 @@ function ChatSearchPanel({ chats, onSelect, onClose, autoFocus }) {
       }
       return matches.slice(0, 3)
     }).slice(0, 8)
-  }, [index, query])
+  }, [index, query, chats])
 
   return (
     <div className="chatSearchPanel">
@@ -1891,7 +1905,6 @@ function ChatSearchPanel({ chats, onSelect, onClose, autoFocus }) {
           }}
         />
       </div>
-      <p className="chatSearchPanelHint"><kbd>⌘</kbd><kbd>K</kbd> · <kbd>⌘</kbd><kbd>F</kbd> · <kbd>Esc</kbd> to close</p>
       {results.length > 0 && (
         <div className="chatSearchPanelResults">
           {results.map((result, i) => (
@@ -2078,12 +2091,15 @@ function SettingsModelDownloads({ open }) {
   )
 }
 
-function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
+function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, currentChatId }) {
   const [open, setOpen] = useState(false)
   const [renderPanel, setRenderPanel] = useState(false)
   const [closing, setClosing] = useState(false)
   const [unloadState, setUnloadState] = useState({ loading: false, message: '' })
   const [openSelect, setOpenSelect] = useState(null)
+  const [systemPromptOpen, setSystemPromptOpen] = useState(false)
+  const [systemPromptDraft, setSystemPromptDraft] = useState('')
+  const [systemPromptBusy, setSystemPromptBusy] = useState(false)
   const wrapRef = useRef(null)
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
@@ -2161,6 +2177,20 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
       window.clearInterval(t)
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open || !systemPromptOpen || !currentChatId) return undefined
+    let cancelled = false
+    ;(async () => {
+      try {
+        const data = await adapter.loadChat(currentChatId)
+        if (!cancelled) setSystemPromptDraft(String(data?.chat?.systemPrompt || ''))
+      } catch {
+        if (!cancelled) setSystemPromptDraft('')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [open, systemPromptOpen, currentChatId])
 
   const handleUnloadModels = async () => {
     if (unloadState.loading) return
@@ -2244,6 +2274,41 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels }) {
             <span>Allow web search</span>
           </label>
           <SelectControl id="searchStrategy" label="Search mode" value={searchStrategy} onChange={setSearchStrategy} options={SEARCH_STRATEGY_OPTIONS} {...selectProps} open={openSelect === 'searchStrategy'} />
+          <div className="settingsModelDownloads">
+            <span className="settingsModelDownloadsTitle">System prompt</span>
+            <small>Applies to this chat. Models can update it via the `set_system_prompt` tool.</small>
+            <div className="downloadChoices">
+              <button type="button" onClick={() => setSystemPromptOpen((v) => !v)} disabled={!currentChatId}>
+                {systemPromptOpen ? 'Close' : 'Edit'}
+              </button>
+              <button
+                type="button"
+                disabled={!currentChatId || systemPromptBusy}
+                onClick={async () => {
+                  if (!currentChatId || typeof adapter.setSystemPrompt !== 'function') return
+                  setSystemPromptBusy(true)
+                  try {
+                    await adapter.setSystemPrompt(currentChatId, systemPromptDraft)
+                  } catch (e) {
+                    setError(e?.message || 'System prompt update failed.')
+                  } finally {
+                    setSystemPromptBusy(false)
+                  }
+                }}
+              >
+                {systemPromptBusy ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+            {systemPromptOpen && (
+              <textarea
+                className="settingsSystemPrompt"
+                value={systemPromptDraft}
+                onChange={(e) => setSystemPromptDraft(e.target.value)}
+                placeholder="System prompt for this chat…"
+                rows={8}
+              />
+            )}
+          </div>
           <button className="settingsActionButton" type="button" onClick={handleUnloadModels} disabled={unloadState.loading}>
             {unloadState.loading ? 'Unloading...' : 'Unload models'}
           </button>
@@ -2260,7 +2325,13 @@ function AttachmentStrip({ attachments }) {
     <div className="messageAttachments">
       {attachments.map((attachment) => (
         <a key={attachment.id} href={attachment.url} target="_blank" rel="noreferrer" className="messageAttachment">
-          <img src={attachment.url} alt={attachment.name || 'Attached image'} />
+          {String(attachment.mimeType || '').startsWith('image/') ? (
+            <img src={attachment.url} alt={attachment.name || 'Attached image'} />
+          ) : (
+            <div className="messageAttachmentFile">
+              <span>{attachment.name || 'file'}</span>
+            </div>
+          )}
         </a>
       ))}
     </div>
@@ -2537,16 +2608,21 @@ export default function App() {
   const [wallNow, setWallNow] = useState(() => Date.now())
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false)
   const [chatSearchOpen, setChatSearchOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
+  const [shareStatus, setShareStatus] = useState('')
+  const shareWrapRef = useRef(null)
   const [backendPhase, setBackendPhase] = useState('online')
   const inputRef = useRef(null)
   const fileInputRef = useRef(null)
   const bootstrappedRef = useRef(false)
-  const [drTopic, setDrTopic] = useState('')
+  const [composerMode, setComposerMode] = useState('chat') // 'chat' | 'deep_research'
   const [drWatchIds, setDrWatchIds] = useState([])
   const [drStatusByChat, setDrStatusByChat] = useState({})
   const drPrevPhaseRef = useRef({})
   const [drRetryUntil, setDrRetryUntil] = useState(null)
   const [drNowTick, setDrNowTick] = useState(() => Date.now())
+  const [globalDropActive, setGlobalDropActive] = useState(false)
+  const globalDropDepthRef = useRef(0)
 
   useEffect(() => {
     setError(null)
@@ -2679,23 +2755,24 @@ export default function App() {
 
   const drRetrySecs = drRetryUntil ? Math.max(0, Math.ceil((drRetryUntil - drNowTick) / 1000)) : null
 
-  const startDeepResearch = useCallback(async () => {
-    const topic = drTopic.trim()
-    if (!topic || !currentChatId) return
+  const startDeepResearch = useCallback(async (topicRaw) => {
+    const topic = String(topicRaw || '').trim()
+    if (!topic || !currentChatId) return false
     if (typeof adapter.startDeepResearch !== 'function') {
       setError('Deep research is not available.')
-      return
+      return false
     }
     try {
       await adapter.startDeepResearch(currentChatId, topic)
       drPrevPhaseRef.current[currentChatId] = 'idle'
       setDrStatusByChat((prev) => ({ ...prev, [currentChatId]: { ...prev[currentChatId], phase: 'running', topic } }))
       setDrWatchIds((ids) => (ids.includes(currentChatId) ? ids : [...ids, currentChatId]))
-      setDrTopic('')
+      return true
     } catch (e) {
       setError(e?.message || String(e))
+      return false
     }
-  }, [currentChatId, drTopic, setError])
+  }, [currentChatId, setError])
 
   const stopDeepResearch = useCallback(async () => {
     if (!currentChatId || typeof adapter.stopDeepResearch !== 'function') return
@@ -2792,6 +2869,56 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const isAllowed = (file) => {
+      if (!file) return false
+      if (file.size > 100 * 1024 * 1024) return false
+      const name = String(file.name || '')
+      const extOk = /\.(txt|md|json|ya?ml|toml|ini|env|js|jsx|ts|tsx|py|go|rs|java|c|cc|cpp|h|hpp|css|html|sh|bash|zsh|xml|csv|tsv|log)$/i.test(name)
+      const typeOk = String(file.type || '').startsWith('text/')
+        || String(file.type || '').startsWith('image/')
+        || String(file.type || '').includes('json')
+      return extOk || typeOk
+    }
+
+    const hasFiles = (dt) => Array.from(dt?.types || []).includes('Files')
+    const onDragEnter = (e) => {
+      if (!hasFiles(e.dataTransfer)) return
+      globalDropDepthRef.current += 1
+      setGlobalDropActive(true)
+      e.preventDefault()
+    }
+    const onDragOver = (e) => {
+      if (!hasFiles(e.dataTransfer)) return
+      e.preventDefault()
+    }
+    const onDragLeave = (e) => {
+      if (!hasFiles(e.dataTransfer)) return
+      globalDropDepthRef.current = Math.max(0, globalDropDepthRef.current - 1)
+      if (globalDropDepthRef.current === 0) setGlobalDropActive(false)
+      e.preventDefault()
+    }
+    const onDrop = (e) => {
+      if (!hasFiles(e.dataTransfer)) return
+      e.preventDefault()
+      globalDropDepthRef.current = 0
+      setGlobalDropActive(false)
+      const files = Array.from(e.dataTransfer?.files || []).filter(isAllowed)
+      if (files.length) addPendingAttachments(files)
+    }
+
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [addPendingAttachments])
+
+  useEffect(() => {
     const onPaletteShortcut = (event) => {
       if ((event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === 'k' || event.key.toLowerCase() === 'f')) {
         event.preventDefault()
@@ -2801,6 +2928,22 @@ export default function App() {
     window.addEventListener('keydown', onPaletteShortcut)
     return () => window.removeEventListener('keydown', onPaletteShortcut)
   }, [])
+
+  useEffect(() => {
+    if (!shareOpen) return undefined
+    const onKey = (e) => {
+      if (e.key === 'Escape') setShareOpen(false)
+    }
+    const onOutside = (e) => {
+      if (!shareWrapRef.current?.contains(e.target)) setShareOpen(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    document.addEventListener('pointerdown', onOutside, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      document.removeEventListener('pointerdown', onOutside, true)
+    }
+  }, [shareOpen])
 
   const orderedChats = useMemo(() => orderChats(chats), [chats])
   const currentIndex = Math.max(0, orderedChats.findIndex((chat) => chat.id === currentChatId))
@@ -2829,6 +2972,41 @@ export default function App() {
     newChat()
   }
 
+  const copyChatLink = async () => {
+    const slug = currentChat?.slug
+    if (!slug) return
+    const url = `${window.location.origin}/chat/${slug}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setShareStatus('Link copied.')
+      window.setTimeout(() => setShareStatus(''), 1600)
+    } catch {
+      setShareStatus('Copy failed.')
+      window.setTimeout(() => setShareStatus(''), 1600)
+    }
+  }
+
+  const exportChatJson = async () => {
+    if (!currentChatId) return
+    try {
+      const data = await adapter.loadChat(currentChatId)
+      const payload = { chat: data.chat, messages: data.messages }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const a = document.createElement('a')
+      const slug = data?.chat?.slug || 'chat'
+      a.href = URL.createObjectURL(blob)
+      a.download = `naow-${slug}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+      setShareStatus('Exported.')
+      window.setTimeout(() => setShareStatus(''), 1600)
+    } catch (e) {
+      setError(e?.message || 'Export failed.')
+    }
+  }
+
 
   const resolvedColorMode = colorMode === 'system' ? (systemDark ? 'dark' : 'light') : colorMode
 
@@ -2841,18 +3019,39 @@ export default function App() {
 
   const currentQueue = queuedMessages.filter((message) => message.chatId === currentChatId)
   const hasDraft = input.trim() || pendingAttachments.length > 0
-  const actionLabel = isStreaming ? (hasDraft ? 'Queue' : 'Stop') : 'Send'
-  const handleComposerAction = () => {
-    if (isStreaming && !hasDraft) stopGeneration()
-    else sendMessage()
+  const actionLabel = composerMode === 'deep_research'
+    ? 'Deep research'
+    : (isStreaming ? (hasDraft ? 'Queue' : 'Send') : 'Send')
+
+  const handleComposerAction = async () => {
+    if (composerMode === 'deep_research') {
+      const ok = await startDeepResearch(input)
+      if (ok) {
+        setInput('')
+        setComposerMode('chat')
+      }
+      return
+    }
+    sendMessage()
   }
-  const addImageFiles = (files) => {
-    const images = Array.from(files || []).filter((file) => ['image/png', 'image/jpeg', 'image/webp'].includes(file.type) && file.size <= 20 * 1024 * 1024)
-    if (images.length) addPendingAttachments(images)
+
+  const addFiles = (files) => {
+    const isAllowed = (file) => {
+      if (!file) return false
+      if (file.size > 100 * 1024 * 1024) return false
+      const name = String(file.name || '')
+      const extOk = /\.(txt|md|json|ya?ml|toml|ini|env|js|jsx|ts|tsx|py|go|rs|java|c|cc|cpp|h|hpp|css|html|sh|bash|zsh|xml|csv|tsv|log)$/i.test(name)
+      const typeOk = String(file.type || '').startsWith('text/')
+        || String(file.type || '').startsWith('image/')
+        || String(file.type || '').includes('json')
+      return extOk || typeOk
+    }
+    const next = Array.from(files || []).filter(isAllowed)
+    if (next.length) addPendingAttachments(next)
   }
 
   return (
-    <div className={`app theme-${theme} color-${resolvedColorMode}`}>
+    <div className={`app theme-${theme} color-${resolvedColorMode} ${globalDropActive ? 'isGlobalDropping' : ''}`}>
       <div className="themeFade" aria-hidden="true" />
       <ErrorToast />
       <DeepResearchDoneToast onOpenChat={(slug) => void selectChat(slug)} />
@@ -2865,13 +3064,28 @@ export default function App() {
           <div className="topBarSpacer" aria-hidden="true" />
           <button type="button" className="brandButton" onClick={() => openNewThread()}>naow</button>
           <div className="topBarTools">
-            <button type="button" className="iconOnlyButton topBarToolButton" onClick={() => openNewThread(true)} aria-label="New chat" title="New chat">
-              <IconNewChatHeader />
-            </button>
             <button type="button" className="iconOnlyButton topBarToolButton" onClick={() => setChatSearchOpen(true)} aria-label="Search chats" title="Search chats (⌘K)">
               <IconMagnifyingGlass />
             </button>
-            <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} onUnloadModels={unloadModels} />
+            <div className="shareMenuWrap" ref={shareWrapRef}>
+              <button
+                type="button"
+                className="iconOnlyButton topBarToolButton"
+                onClick={() => setShareOpen((v) => !v)}
+                aria-label="Share or export"
+                title="Share or export"
+              >
+                <IconShare />
+              </button>
+              {shareOpen && (
+                <div className="shareMenuCard" role="dialog" aria-label="Share or export">
+                  <button type="button" onClick={() => void copyChatLink()} disabled={!currentChat?.slug}>Share (copy link)</button>
+                  <button type="button" onClick={() => void exportChatJson()} disabled={!currentChatId}>Export JSON</button>
+                  {shareStatus ? <small>{shareStatus}</small> : null}
+                </div>
+              )}
+            </div>
+            <Settings models={models} selectedModel={selectedModel} setSelectedModel={setSelectedModel} onUnloadModels={unloadModels} currentChatId={currentChatId} />
           </div>
         </div>
       </header>
@@ -2898,48 +3112,6 @@ export default function App() {
       </main>
 
       <footer className="composer">
-        {currentChatId && (
-          <div className="deepResearchBar" aria-label="Deep research">
-            <span className="deepResearchLabel">Deep research</span>
-            <input
-              type="text"
-              value={drTopic}
-              onChange={(e) => setDrTopic(e.target.value)}
-              placeholder="Topic (MLX + search)…"
-              disabled={drStatus.phase === 'running'}
-            />
-            <button
-              type="button"
-              className="deepResearchStart"
-              onClick={() => void startDeepResearch()}
-              disabled={!drTopic.trim() || drStatus.phase === 'running'}
-            >
-              Start
-            </button>
-            {drStatus.phase === 'running' && (
-              <button type="button" className="deepResearchStop" onClick={() => void stopDeepResearch()}>Stop</button>
-            )}
-            {drStatus.phase === 'running' && Array.isArray(drStatus.goals) && drStatus.goals.length > 0 && (
-              <span className="deepResearchGoals">
-                Goal {(drStatus.currentGoalIndex ?? 0) + 1}/{drStatus.goals.length}
-              </span>
-            )}
-            {drStatus.phase === 'running' && typeof drStatus.searchesThisGoal === 'number' && (
-              <span className="deepResearchSearches" title="Searches this goal (warn 175, cap 200)">
-                {drStatus.searchesThisGoal}/200
-              </span>
-            )}
-            {drStatus.phase === 'running' && drStatus.pausedMessage && (
-              <>
-                <span className="deepResearchPause">
-                  {drStatus.pausedMessage}
-                  {drRetrySecs != null ? ` · ${drRetrySecs}s` : ''}
-                </span>
-                <button type="button" className="deepResearchRetry" onClick={() => void retryDeepResearch()}>Retry now</button>
-              </>
-            )}
-          </div>
-        )}
         {currentQueue.length > 0 && (
           <div className="queueShelf" aria-live="polite">
             <span className="queueLabel">{currentQueue.length === 1 ? 'Queued next' : `${currentQueue.length} queued`}</span>
@@ -2955,21 +3127,47 @@ export default function App() {
           <div className="attachmentTray">
             {pendingAttachments.map((attachment) => (
               <div className="attachmentChip" key={attachment.id}>
-                <img src={attachment.previewUrl} alt={attachment.name} />
+                {String(attachment.mimeType || '').startsWith('image/') ? (
+                  <img src={attachment.previewUrl} alt={attachment.name} />
+                ) : (
+                  <div className="attachmentFileIcon" aria-hidden="true">
+                    {(attachment.name || 'file').split('.').pop()?.slice(0, 4)?.toUpperCase() || 'FILE'}
+                  </div>
+                )}
                 <span>{attachment.name}</span>
                 <button onClick={() => removePendingAttachment(attachment.id)} aria-label={`Remove ${attachment.name}`}>×</button>
               </div>
             ))}
           </div>
         )}
+        {currentChatId && drStatus.phase === 'running' && (
+          <div className="deepResearchInline" role="status" aria-live="polite">
+            <span className="deepResearchInlineTitle">
+              Deep research
+              {Array.isArray(drStatus.goals) && drStatus.goals.length > 0
+                ? ` · Goal ${(drStatus.currentGoalIndex ?? 0) + 1}/${drStatus.goals.length}`
+                : ''}
+              {typeof drStatus.searchesThisGoal === 'number' ? ` · ${drStatus.searchesThisGoal}/200` : ''}
+            </span>
+            {drStatus.pausedMessage && (
+              <>
+                <span className="deepResearchInlinePause">
+                  {drStatus.pausedMessage}{drRetrySecs != null ? ` · ${drRetrySecs}s` : ''}
+                </span>
+                <button type="button" className="deepResearchRetry" onClick={() => void retryDeepResearch()}>Retry now</button>
+              </>
+            )}
+            <button type="button" className="deepResearchStop" onClick={() => void stopDeepResearch()}>Stop</button>
+          </div>
+        )}
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/webp"
+          accept="text/*,application/json,application/x-yaml,.md,.txt,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cc,.cpp,.h,.hpp,.css,.html,.sh,.bash,.zsh,.yaml,.yml,.toml,.ini,.env,image/*"
           multiple
           hidden
           onChange={(event) => {
-            addImageFiles(event.target.files)
+            addFiles(event.target.files)
             event.target.value = ''
           }}
         />
@@ -2983,22 +3181,49 @@ export default function App() {
           onDrop={(event) => {
             event.preventDefault()
             event.currentTarget.classList.remove('isDropping')
-            addImageFiles(event.dataTransfer.files)
+            addFiles(event.dataTransfer.files)
           }}
         >
-          <button className="attachButton" type="button" onClick={() => fileInputRef.current?.click()} aria-label="Attach image">+</button>
+          <button className="attachButton" type="button" onClick={() => fileInputRef.current?.click()} aria-label="Attach file">+</button>
+          <button
+            type="button"
+            className={`researchButton iconOnlyButton ${composerMode === 'deep_research' ? 'isActive' : ''}`}
+            onClick={() => setComposerMode((m) => (m === 'deep_research' ? 'chat' : 'deep_research'))}
+            aria-label="Deep research"
+          >
+            <IconSources />
+            <span className="vibeTooltip" role="tooltip">Deep research</span>
+          </button>
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={(event) => addImageFiles(event.clipboardData?.files)}
+            onKeyDown={(e) => {
+              if (composerMode === 'deep_research' && e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void handleComposerAction()
+                return
+              }
+              handleKeyDown(e)
+            }}
+            onPaste={(event) => addFiles(event.clipboardData?.files)}
             disabled={!currentChat}
-            placeholder={isStreaming ? 'Queue the next message' : 'Message naow'}
+            placeholder={composerMode === 'deep_research' ? 'Deep research topic…' : (isStreaming ? 'Queue the next message' : 'Message naow')}
             rows={1}
             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 138)}px` }}
           />
           <div className="composerActions">
+            {isStreaming && (
+              <button
+                type="button"
+                className="stopButton"
+                onClick={stopGeneration}
+                aria-label="Stop"
+                title="Stop"
+              >
+                <IconStopComposer />
+              </button>
+            )}
             <button
               type="button"
               className="sendButton"
@@ -3006,7 +3231,7 @@ export default function App() {
               aria-label={actionLabel}
               title={actionLabel}
             >
-              {isStreaming ? (hasDraft ? <IconQueueComposer /> : <IconStopComposer />) : <IconSend />}
+              {composerMode === 'deep_research' ? <IconSend /> : (isStreaming ? <IconQueueComposer /> : <IconSend />)}
             </button>
           </div>
         </div>
