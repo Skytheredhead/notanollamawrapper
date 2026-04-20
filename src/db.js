@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { randomChatSlug } from './chat-slug.js';
 import { normalizeDefaultSystemPrompt } from './default-system-prompt.js';
 
 function rowToChat(row) {
   if (!row) return null;
   return {
     id: row.id,
+    slug: row.slug || null,
     title: row.title,
     model: row.model,
     systemPrompt: normalizeDefaultSystemPrompt(row.system_prompt),
@@ -99,6 +101,7 @@ function rowToAttachment(row) {
 function rowToChatSummary(row) {
   return {
     id: row.id,
+    slug: row.slug || null,
     title: row.title,
     model: row.model,
     createdAt: row.created_at,
@@ -207,16 +210,41 @@ export class LocalDatabase {
     if (!messageColumns.some((column) => column.name === 'metadata_json')) {
       this.db.exec('ALTER TABLE messages ADD COLUMN metadata_json TEXT');
     }
+
+    const chatColumns = this.db.prepare('PRAGMA table_info(chats)').all();
+    if (!chatColumns.some((column) => column.name === 'slug')) {
+      this.db.exec('ALTER TABLE chats ADD COLUMN slug TEXT');
+      this.db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_slug ON chats(slug) WHERE slug IS NOT NULL'
+      );
+    }
+
+    const slugless = this.db.prepare('SELECT id FROM chats WHERE slug IS NULL').all();
+    const updateSlug = this.db.prepare('UPDATE chats SET slug = ? WHERE id = ?');
+    const slugTaken = this.db.prepare('SELECT 1 FROM chats WHERE slug = ?');
+    for (const { id } of slugless) {
+      let assigned = null;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const candidate = randomChatSlug();
+        if (!slugTaken.get(candidate)) {
+          assigned = candidate;
+          break;
+        }
+      }
+      if (!assigned) throw new Error('Could not backfill chat slug.');
+      updateSlug.run(assigned, id);
+    }
   }
 
   prepare() {
     this.statements = {
       health: this.db.prepare('SELECT 1 AS ok'),
       createChat: this.db.prepare(`
-        INSERT INTO chats (id, title, model, system_prompt, created_at, updated_at)
-        VALUES (@id, @title, @model, @systemPrompt, @createdAt, @updatedAt)
+        INSERT INTO chats (id, title, model, system_prompt, slug, created_at, updated_at)
+        VALUES (@id, @title, @model, @systemPrompt, @slug, @createdAt, @updatedAt)
       `),
       getChat: this.db.prepare('SELECT * FROM chats WHERE id = ?'),
+      getChatBySlug: this.db.prepare('SELECT * FROM chats WHERE slug = ?'),
       touchChat: this.db.prepare('UPDATE chats SET updated_at = ? WHERE id = ?'),
       setChatModelIfEmpty: this.db.prepare(`
         UPDATE chats SET model = ?, updated_at = ? WHERE id = ? AND model IS NULL
@@ -389,11 +417,21 @@ export class LocalDatabase {
 
   createChat({ title = 'New chat', model = null, systemPrompt = null } = {}) {
     const timestamp = this.now();
+    let slug = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = randomChatSlug();
+      if (!this.statements.getChatBySlug.get(candidate)) {
+        slug = candidate;
+        break;
+      }
+    }
+    if (!slug) throw new Error('Could not allocate chat slug.');
     const chat = {
       id: randomUUID(),
       title: title || 'New chat',
       model: model || null,
       systemPrompt: systemPrompt || null,
+      slug,
       createdAt: timestamp,
       updatedAt: timestamp
     };
@@ -404,6 +442,12 @@ export class LocalDatabase {
 
   getChat(chatId) {
     return rowToChat(this.statements.getChat.get(chatId));
+  }
+
+  getChatBySlug(slug) {
+    const key = String(slug || '').trim().toLowerCase();
+    if (!key) return null;
+    return rowToChat(this.statements.getChatBySlug.get(key));
   }
 
   touchChat(chatId, timestamp = this.now()) {

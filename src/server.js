@@ -9,6 +9,7 @@ import { SearxngSidecar } from './search-sidecar.js';
 import { WebSearchClient } from './web-search.js';
 import { PreSearchManager } from './presearch-manager.js';
 import { SourceSummaryCache } from './source-summaries.js';
+import { DeepResearchManager } from './deep-research-manager.js';
 
 const config = loadConfig();
 const db = new LocalDatabase(config.dbPath);
@@ -60,6 +61,8 @@ const sourceSummaryCache = new SourceSummaryCache({
   modelClient
 });
 
+const deepResearchManager = new DeepResearchManager();
+
 // Expose sidecars to routes so the UI can (re)start them.
 
 const app = buildApp({
@@ -70,7 +73,8 @@ const app = buildApp({
   mlxSidecar,
   searchClient,
   preSearchManager,
-  sourceSummaryCache
+  sourceSummaryCache,
+  deepResearchManager
 });
 const idleGuard = new IdleResourceGuard({
   config,

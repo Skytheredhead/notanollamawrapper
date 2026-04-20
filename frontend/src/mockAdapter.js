@@ -14,8 +14,12 @@ const RESPONSES = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let cidx = 2
+const letters = 'abcdefghijklmnopqrstuvwxyz'
+function mockSlug(seed) {
+  return [...Array(5)].map((_, i) => letters[(seed * 7 + i * 11) % 26]).join('')
+}
 let chats = [
-  { id: 'c1', title: 'Welcome to naow', model: 'llama3:8b', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'c1', slug: mockSlug(1), title: 'Welcome to naow', model: 'llama3:8b', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 ]
 const msgs = {
   c1: [
@@ -112,7 +116,8 @@ const mockAdapter = {
   async createChat(title = 'New Chat', model = MODELS[0]) {
     await sleep(40)
     const now = new Date().toISOString()
-    const chat = { id: `c${++cidx}`, title, model, createdAt: now, updatedAt: now }
+    const id = `c${++cidx}`
+    const chat = { id, slug: mockSlug(cidx), title, model, createdAt: now, updatedAt: now }
     chats = [chat, ...chats]
     msgs[chat.id] = []
     return chat
@@ -120,8 +125,29 @@ const mockAdapter = {
 
   async loadChat(id) {
     await sleep(40)
-    const chat = chats.find((c) => c.id === id) ?? null
-    return { chat, messages: [...(msgs[id] ?? [])] }
+    const chat = chats.find((c) => c.id === id || c.slug === id) ?? null
+    const key = chat?.id
+    return { chat, messages: [...(msgs[key] ?? [])] }
+  },
+
+  async getDeepResearch() {
+    await sleep(20)
+    return { phase: 'idle' }
+  },
+
+  async startDeepResearch() {
+    await sleep(40)
+    return { started: true }
+  },
+
+  async stopDeepResearch() {
+    await sleep(20)
+    return { ok: true }
+  },
+
+  async retryDeepResearch() {
+    await sleep(20)
+    return { ok: true }
   },
 
   sendMessage(chatId, content, model, options, webSearch, attachments, onToken, onDone, onError) {

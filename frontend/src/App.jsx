@@ -24,6 +24,7 @@ const CONTEXT_OPTIONS = [
   [32768, '32k'],
   [65536, '64k'],
   [131072, '128k'],
+  [262144, '256k'],
 ]
 
 const RESIDENCY_OPTIONS = [
@@ -2470,6 +2471,36 @@ function ErrorToast() {
   )
 }
 
+function DeepResearchDoneToast({ onOpenChat }) {
+  const toast = useStore((s) => s.deepResearchDoneToast)
+  const setToast = useStore((s) => s.setDeepResearchDoneToast)
+
+  useEffect(() => {
+    if (!toast) return
+    const t = window.setTimeout(() => setToast(null), 8200)
+    return () => window.clearTimeout(t)
+  }, [toast, setToast])
+
+  if (!toast?.slug) return null
+
+  return (
+    <div className="deepResearchToast" role="status" aria-live="polite">
+      <span>Deep research finished{toast.topic ? `: ${toast.topic}` : ''}</span>
+      <button
+        type="button"
+        className="deepResearchToastPrimary"
+        onClick={() => {
+          onOpenChat(toast.slug)
+          setToast(null)
+        }}
+      >
+        Open chat
+      </button>
+      <button type="button" onClick={() => setToast(null)} aria-label="Dismiss">×</button>
+    </div>
+  )
+}
+
 function BackendOfflineToast({ backendPhase, onStart }) {
   if (backendPhase === 'online') return null
   const starting = backendPhase === 'starting'
@@ -2510,6 +2541,12 @@ export default function App() {
   const inputRef = useRef(null)
   const fileInputRef = useRef(null)
   const bootstrappedRef = useRef(false)
+  const [drTopic, setDrTopic] = useState('')
+  const [drWatchIds, setDrWatchIds] = useState([])
+  const [drStatusByChat, setDrStatusByChat] = useState({})
+  const drPrevPhaseRef = useRef({})
+  const [drRetryUntil, setDrRetryUntil] = useState(null)
+  const [drNowTick, setDrNowTick] = useState(() => Date.now())
 
   useEffect(() => {
     setError(null)
@@ -2527,6 +2564,11 @@ export default function App() {
       try {
         await loadModels()
         const loaded = await loadChats()
+        const pathMatch = typeof window !== 'undefined' && window.location.pathname.match(/^\/chat\/([a-z]{5})\/?$/)
+        if (pathMatch) {
+          await selectChat(pathMatch[1])
+          return
+        }
         const ordered = orderChats(loaded)
         const reusable = [...ordered].reverse().find((chat) => {
           const cachedMessages = useStore.getState().messagesByChat[chat.id]
@@ -2542,6 +2584,136 @@ export default function App() {
     }
     bootstrap()
   }, [])
+
+  useEffect(() => {
+    const onPop = () => {
+      const m = window.location.pathname.match(/^\/chat\/([a-z]{5})\/?$/)
+      if (m) void selectChat(m[1])
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [selectChat])
+
+  useEffect(() => {
+    if (!currentChatId) return undefined
+    let cancelled = false
+    ;(async () => {
+      try {
+        if (typeof adapter.getDeepResearch !== 'function') return
+        const st = await adapter.getDeepResearch(currentChatId)
+        if (cancelled) return
+        setDrStatusByChat((prev) => ({ ...prev, [currentChatId]: st }))
+        if (st?.phase === 'running') {
+          drPrevPhaseRef.current[currentChatId] = st.phase
+          setDrWatchIds((ids) => (ids.includes(currentChatId) ? ids : [...ids, currentChatId]))
+        }
+      } catch {
+        /* optional endpoint */
+      }
+    })()
+    return () => { cancelled = true }
+  }, [currentChatId])
+
+  useEffect(() => {
+    if (drWatchIds.length === 0) return undefined
+    let cancelled = false
+    const tick = async () => {
+      const ids = [...drWatchIds]
+      for (const id of ids) {
+        try {
+          if (typeof adapter.getDeepResearch !== 'function') return
+          const st = await adapter.getDeepResearch(id)
+          if (cancelled) return
+          setDrStatusByChat((prev) => ({ ...prev, [id]: st }))
+          const prev = drPrevPhaseRef.current[id] ?? 'idle'
+          const phase = st.phase || 'idle'
+          if (prev === 'running' && phase === 'complete') {
+            const cur = useStore.getState().currentChatId
+            if (cur !== id) {
+              const chat = useStore.getState().chats.find((c) => c.id === id)
+              if (chat?.slug) {
+                useStore.getState().setDeepResearchDoneToast({ slug: chat.slug, topic: st.topic || 'Deep research' })
+              }
+            }
+          }
+          drPrevPhaseRef.current[id] = phase
+          if (['complete', 'stopped', 'error'].includes(phase)) {
+            try {
+              const { messages: ms } = await adapter.loadChat(id)
+              useStore.getState().setMessagesForChat(id, ms ?? [])
+            } catch {
+              /* ignore */
+            }
+            loadChats().catch(() => {})
+            setDrWatchIds((list) => list.filter((x) => x !== id))
+          }
+        } catch {
+          if (!cancelled) {
+            setDrStatusByChat((prev) => ({ ...prev, [id]: { phase: 'error', error: 'status_failed' } }))
+          }
+        }
+      }
+    }
+    tick()
+    const iv = window.setInterval(tick, 2500)
+    return () => {
+      cancelled = true
+      window.clearInterval(iv)
+    }
+  }, [drWatchIds.join(','), loadChats])
+
+  const drStatus = drStatusByChat[currentChatId] || { phase: 'idle' }
+  useEffect(() => {
+    if (drStatus?.nextRetryInMs) {
+      setDrRetryUntil(Date.now() + drStatus.nextRetryInMs)
+    } else {
+      setDrRetryUntil(null)
+    }
+  }, [currentChatId, drStatus?.nextRetryInMs, drStatus?.updatedAt])
+
+  useEffect(() => {
+    if (!drRetryUntil) return undefined
+    const iv = window.setInterval(() => setDrNowTick(Date.now()), 400)
+    return () => window.clearInterval(iv)
+  }, [drRetryUntil])
+
+  const drRetrySecs = drRetryUntil ? Math.max(0, Math.ceil((drRetryUntil - drNowTick) / 1000)) : null
+
+  const startDeepResearch = useCallback(async () => {
+    const topic = drTopic.trim()
+    if (!topic || !currentChatId) return
+    if (typeof adapter.startDeepResearch !== 'function') {
+      setError('Deep research is not available.')
+      return
+    }
+    try {
+      await adapter.startDeepResearch(currentChatId, topic)
+      drPrevPhaseRef.current[currentChatId] = 'idle'
+      setDrStatusByChat((prev) => ({ ...prev, [currentChatId]: { ...prev[currentChatId], phase: 'running', topic } }))
+      setDrWatchIds((ids) => (ids.includes(currentChatId) ? ids : [...ids, currentChatId]))
+      setDrTopic('')
+    } catch (e) {
+      setError(e?.message || String(e))
+    }
+  }, [currentChatId, drTopic, setError])
+
+  const stopDeepResearch = useCallback(async () => {
+    if (!currentChatId || typeof adapter.stopDeepResearch !== 'function') return
+    try {
+      await adapter.stopDeepResearch(currentChatId)
+    } catch (e) {
+      setError(e?.message || String(e))
+    }
+  }, [currentChatId, setError])
+
+  const retryDeepResearch = useCallback(async () => {
+    if (!currentChatId || typeof adapter.retryDeepResearch !== 'function') return
+    try {
+      await adapter.retryDeepResearch(currentChatId)
+    } catch (e) {
+      setError(e?.message || String(e))
+    }
+  }, [currentChatId, setError])
 
   useEffect(() => {
     let cancelled = false
@@ -2683,6 +2855,7 @@ export default function App() {
     <div className={`app theme-${theme} color-${resolvedColorMode}`}>
       <div className="themeFade" aria-hidden="true" />
       <ErrorToast />
+      <DeepResearchDoneToast onOpenChat={(slug) => void selectChat(slug)} />
       <div className="topRightHud">
         <BackendOfflineToast backendPhase={backendPhase} onStart={startBackend} />
         <LiveActivityDock />
@@ -2725,6 +2898,48 @@ export default function App() {
       </main>
 
       <footer className="composer">
+        {currentChatId && (
+          <div className="deepResearchBar" aria-label="Deep research">
+            <span className="deepResearchLabel">Deep research</span>
+            <input
+              type="text"
+              value={drTopic}
+              onChange={(e) => setDrTopic(e.target.value)}
+              placeholder="Topic (MLX + search)…"
+              disabled={drStatus.phase === 'running'}
+            />
+            <button
+              type="button"
+              className="deepResearchStart"
+              onClick={() => void startDeepResearch()}
+              disabled={!drTopic.trim() || drStatus.phase === 'running'}
+            >
+              Start
+            </button>
+            {drStatus.phase === 'running' && (
+              <button type="button" className="deepResearchStop" onClick={() => void stopDeepResearch()}>Stop</button>
+            )}
+            {drStatus.phase === 'running' && Array.isArray(drStatus.goals) && drStatus.goals.length > 0 && (
+              <span className="deepResearchGoals">
+                Goal {(drStatus.currentGoalIndex ?? 0) + 1}/{drStatus.goals.length}
+              </span>
+            )}
+            {drStatus.phase === 'running' && typeof drStatus.searchesThisGoal === 'number' && (
+              <span className="deepResearchSearches" title="Searches this goal (warn 175, cap 200)">
+                {drStatus.searchesThisGoal}/200
+              </span>
+            )}
+            {drStatus.phase === 'running' && drStatus.pausedMessage && (
+              <>
+                <span className="deepResearchPause">
+                  {drStatus.pausedMessage}
+                  {drRetrySecs != null ? ` · ${drRetrySecs}s` : ''}
+                </span>
+                <button type="button" className="deepResearchRetry" onClick={() => void retryDeepResearch()}>Retry now</button>
+              </>
+            )}
+          </div>
+        )}
         {currentQueue.length > 0 && (
           <div className="queueShelf" aria-live="polite">
             <span className="queueLabel">{currentQueue.length === 1 ? 'Queued next' : `${currentQueue.length} queued`}</span>

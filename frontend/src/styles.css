@@ -2526,6 +2526,131 @@ button, input, textarea, select { font: inherit; }
   border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
 }
 
+.deepResearchToast {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 61;
+  width: min(720px, calc(100vw - 24px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: calc(var(--radius) + 2px);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+  box-shadow: 0 22px 64px rgba(0, 0, 0, 0.14);
+  color: var(--ink);
+  backdrop-filter: blur(18px) saturate(1.05);
+}
+
+.deepResearchToast span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.deepResearchToastPrimary {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.deepResearchToastPrimary:hover,
+.deepResearchToastPrimary:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.deepResearchToast > button:last-child {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.deepResearchBar {
+  width: min(920px, 100%);
+  margin: 0 auto 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
+}
+
+.deepResearchLabel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.deepResearchBar input[type="text"] {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.deepResearchStart,
+.deepResearchStop,
+.deepResearchRetry {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.deepResearchStart {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.deepResearchStop {
+  border-color: color-mix(in srgb, #d84a4a 35%, var(--line));
+}
+
+.deepResearchGoals,
+.deepResearchSearches,
+.deepResearchPause {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.deepResearchPause {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
 .topRightHud {
   position: fixed;
   top: 14px;

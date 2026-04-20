@@ -65,6 +65,16 @@ function assertChat(db, chatId) {
   return chat;
 }
 
+function resolveChat(db, param) {
+  const key = String(param || '').trim();
+  if (!key) throw notFound('Chat not found.');
+  if (/^[a-z]{5}$/.test(key)) {
+    const bySlug = db.getChatBySlug(key);
+    if (bySlug) return bySlug;
+  }
+  return assertChat(db, key);
+}
+
 function buildErrorMessage(error) {
   if (error instanceof OllamaStreamError) return error.message;
   if (error instanceof MlxStreamError) return error.message;
@@ -1297,7 +1307,17 @@ function createGeneration({ db, generationManager, chat, model }) {
   }
 }
 
-export function registerRoutes(app, { config, db, ollama, generationManager, mlxSidecar = null, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
+export function registerRoutes(app, {
+  config,
+  db,
+  ollama,
+  generationManager,
+  mlxSidecar = null,
+  searchClient = null,
+  preSearchManager = null,
+  sourceSummaryCache = null,
+  deepResearchManager = null
+}) {
   const toolRuntime = createToolRuntime(config, ollama, searchClient);
 
   app.get('/health', async () => {
@@ -1519,7 +1539,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
     if (!body.chatId) {
       throw badRequest('missing_chat_id', 'chatId is required.');
     }
-    const chat = assertChat(db, body.chatId);
+    const chat = resolveChat(db, body.chatId);
     try {
       return await preSearchManager.analyze({
         chatId: chat.id,
@@ -1613,13 +1633,56 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
   });
 
   app.get('/api/chats/:chatId', async (request) => {
-    const chat = assertChat(db, request.params.chatId);
+    const chat = resolveChat(db, request.params.chatId);
     const includeReplaced = request.query?.includeReplaced === 'true';
     return {
       chat,
       messages: db.getMessages(chat.id, { includeReplaced })
     };
   });
+
+  if (deepResearchManager) {
+    app.get('/api/chats/:chatId/deep-research', async (request) => {
+      const chat = resolveChat(db, request.params.chatId);
+      const st = deepResearchManager.getStatus(chat.id);
+      if (!st) return { phase: 'idle' };
+      const { abortController, ...pub } = st;
+      void abortController;
+      return pub;
+    });
+
+    app.post('/api/chats/:chatId/deep-research/start', async (request, reply) => {
+      const chat = resolveChat(db, request.params.chatId);
+      const body = request.body || {};
+      const topic = requireString(body.topic);
+      if (!topic) throw badRequest('missing_topic', 'Topic is required.');
+      if (!searchClient) throw unavailable('search_unavailable', 'Search is not configured for deep research.');
+      const r = deepResearchManager.start({
+        chatId: chat.id,
+        topic,
+        db,
+        ollama,
+        searchClient,
+        config
+      });
+      if (!r.ok) return reply.code(409).send(r);
+      return { started: true };
+    });
+
+    app.post('/api/chats/:chatId/deep-research/stop', async (request) => {
+      const chat = resolveChat(db, request.params.chatId);
+      deepResearchManager.stop(chat.id);
+      return { ok: true };
+    });
+
+    app.post('/api/chats/:chatId/deep-research/retry', async (request, reply) => {
+      const chat = resolveChat(db, request.params.chatId);
+      const gate = deepResearchManager.canManualRetry(chat.id);
+      if (!gate.ok) return reply.code(429).send(gate);
+      deepResearchManager.requestResume(chat.id);
+      return { ok: true };
+    });
+  }
 
   app.get('/api/attachments/:attachmentId', async (request, reply) => {
     const attachment = db.getAttachment(request.params.attachmentId);
@@ -1639,7 +1702,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
         throw badRequest('empty_message', 'Message content is required.');
       }
 
-      const chat = assertChat(db, request.params.chatId);
+      const chat = resolveChat(db, request.params.chatId);
       const model = resolveModel({ body, chat, config });
       if (!model) {
         throw badRequest('missing_model', 'Provide a model, set a chat model, or configure NAOW_DEFAULT_MODEL.');
@@ -1710,7 +1773,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
       throw badRequest('empty_message', 'Message content is required.');
     }
 
-    const chat = assertChat(db, request.params.chatId);
+    const chat = resolveChat(db, request.params.chatId);
     const visibleMessages = db.getMessages(chat.id);
     const targetIndex = visibleMessages.findIndex((message) => message.id === request.params.messageId);
     const targetMessage = targetIndex >= 0 ? visibleMessages[targetIndex] : null;
@@ -1789,7 +1852,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
 
   app.post('/api/chats/:chatId/regenerate', async (request, reply) => {
     const body = request.body || {};
-    const chat = assertChat(db, request.params.chatId);
+    const chat = resolveChat(db, request.params.chatId);
     const visibleMessages = db.getMessages(chat.id);
     const requestedMessageId = requireString(body.messageId || body.assistantMessageId);
     let latestAssistant = requestedMessageId
@@ -1876,7 +1939,7 @@ export function registerRoutes(app, { config, db, ollama, generationManager, mlx
   });
 
   app.post('/api/chats/:chatId/stop', async (request) => {
-    assertChat(db, request.params.chatId);
+    resolveChat(db, request.params.chatId);
     const entry = generationManager.stopByChat(request.params.chatId, 'user_stopped');
     if (!entry) {
       return {

@@ -387,6 +387,49 @@ const realAdapter = {
     })()
     return ctrl
   },
+
+  async getDeepResearch(chatId) {
+    const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research`)
+    if (r.status === 404) return { phase: 'idle' }
+    if (!r.ok) throw new Error(`getDeepResearch: ${r.status}`)
+    return r.json()
+  },
+
+  async startDeepResearch(chatId, topic) {
+    const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    })
+    if (!r.ok) {
+      let detail = r.statusText
+      try {
+        const j = await r.json()
+        detail = j?.error?.message || j?.error || detail
+      } catch { /* ignore */ }
+      throw new Error(detail || `startDeepResearch: ${r.status}`)
+    }
+    return r.json()
+  },
+
+  async stopDeepResearch(chatId) {
+    const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research/stop`, { method: 'POST' })
+    if (!r.ok) throw new Error(`stopDeepResearch: ${r.status}`)
+    return r.json()
+  },
+
+  async retryDeepResearch(chatId) {
+    const r = await fetch(`${BASE}/chats/${encodeURIComponent(chatId)}/deep-research/retry`, { method: 'POST' })
+    if (!r.ok) {
+      let detail = r.statusText
+      try {
+        const j = await r.json()
+        detail = j?.message || j?.reason || j?.error || detail
+      } catch { /* ignore */ }
+      throw new Error(detail || `retryDeepResearch: ${r.status}`)
+    }
+    return r.json()
+  },
 }
 
 export default realAdapter

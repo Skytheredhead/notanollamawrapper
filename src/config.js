@@ -192,6 +192,8 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     toolsMdPath: path.resolve(cwd, env.NAOW_TOOLS_MD_PATH || 'tools.md'),
     mlxBaseUrl: normalizeUrl(env.NAOW_MLX_BASE_URL, DEFAULTS.mlxBaseUrl),
     mlxModel: env.NAOW_MLX_MODEL || DEFAULTS.mlxModel,
+    deepResearchModel:
+      env.NAOW_DEEP_RESEARCH_MODEL || 'Jiunsong/supergemma4-26b-uncensored-mlx-4bit-v2',
     mlxResidency: parseResidency(env.NAOW_MLX_RESIDENCY),
     mlxAutostart: parseBoolean(env.NAOW_MLX_AUTOSTART, true),
     mlxPython: env.NAOW_MLX_PYTHON || path.join(resolvedDataDir, 'mlx-venv', 'bin', 'python')

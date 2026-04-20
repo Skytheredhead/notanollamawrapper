@@ -307,6 +307,9 @@ const useStore = create(
 
       error: null,
       setError: (e) => set({ error: e }),
+
+      deepResearchDoneToast: null,
+      setDeepResearchDoneToast: (deepResearchDoneToast) => set({ deepResearchDoneToast }),
     }),
     {
       name: 'naow-persist',

@@ -180,18 +180,63 @@ export function useChat() {
     } catch (e) { setError(e.message); return [] }
   }, [])
 
-  const selectChat = useCallback(async (id) => {
+  const selectChat = useCallback(async (idOrSlug) => {
     if (useStore.getState().isStreaming) return
-    setCurrentChatId(id)
-    const cached = useStore.getState().messagesByChat[id]
-    if (cached) {
-      setMessages(cached)
-      return
+    const raw = String(idOrSlug ?? '').trim()
+    if (!raw) return
+    const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)
+    const chatList = useStore.getState().chats
+    const fromList = looksLikeUuid
+      ? chatList.find((c) => c.id === raw)
+      : chatList.find((c) => c.slug === raw || c.id === raw)
+    const resolvedId = fromList?.id || (looksLikeUuid ? raw : null)
+
+    if (looksLikeUuid && resolvedId) {
+      const cached = useStore.getState().messagesByChat[resolvedId]
+      if (cached) {
+        setCurrentChatId(resolvedId)
+        setMessages(cached)
+        const slug = fromList?.slug
+        if (slug && typeof window !== 'undefined') {
+          const path = `/chat/${slug}`
+          if (window.location.pathname !== path) {
+            window.history.pushState({ naowChatSlug: slug }, '', path)
+          }
+        }
+        return
+      }
+    }
+    if (!looksLikeUuid && fromList?.id) {
+      const cached = useStore.getState().messagesByChat[fromList.id]
+      if (cached) {
+        setCurrentChatId(fromList.id)
+        setMessages(cached)
+        if (fromList.slug && typeof window !== 'undefined') {
+          const path = `/chat/${fromList.slug}`
+          if (window.location.pathname !== path) {
+            window.history.pushState({ naowChatSlug: fromList.slug }, '', path)
+          }
+        }
+        return
+      }
     }
     try {
-      const { messages: ms } = await adapter.loadChat(id)
-      setMessagesForChat(id, ms ?? [])
-    } catch (e) { setError(e.message) }
+      const data = await adapter.loadChat(raw)
+      const chat = data.chat
+      const ms = data.messages ?? []
+      if (!chat?.id) return
+      setCurrentChatId(chat.id)
+      setMessagesForChat(chat.id, ms)
+      const slug = chat.slug
+      if (slug && typeof window !== 'undefined') {
+        const path = `/chat/${slug}`
+        if (window.location.pathname !== path) {
+          window.history.pushState({ naowChatSlug: slug }, '', path)
+        }
+      }
+    } catch (e) {
+      setError(e.message)
+    }
   }, [])
 
   const newChat = useCallback(async () => {
@@ -201,6 +246,9 @@ export function useChat() {
       setChats(cs)
       setCurrentChatId(chat.id)
       setMessages([])
+      if (chat?.slug && typeof window !== 'undefined') {
+        window.history.replaceState({ naowChatSlug: chat.slug }, '', `/chat/${chat.slug}`)
+      }
       return chat
     } catch (e) { setError(e.message) }
   }, [])

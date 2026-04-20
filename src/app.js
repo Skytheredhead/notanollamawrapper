@@ -4,7 +4,17 @@ import { ApiError, sendError } from './errors.js';
 import { registerFrontend } from './frontend.js';
 import { registerRoutes } from './routes.js';
 
-export function buildApp({ config, db, ollama, generationManager, mlxSidecar = null, searchClient = null, preSearchManager = null, sourceSummaryCache = null }) {
+export function buildApp({
+  config,
+  db,
+  ollama,
+  generationManager,
+  mlxSidecar = null,
+  searchClient = null,
+  preSearchManager = null,
+  sourceSummaryCache = null,
+  deepResearchManager = null
+}) {
   const app = Fastify({
     logger: false,
     bodyLimit: 24 * 1024 * 1024
@@ -52,7 +62,8 @@ export function buildApp({ config, db, ollama, generationManager, mlxSidecar = n
     mlxSidecar,
     searchClient,
     preSearchManager,
-    sourceSummaryCache
+    sourceSummaryCache,
+    deepResearchManager
   });
   registerFrontend(app, {
     distDir: config.frontendDist
