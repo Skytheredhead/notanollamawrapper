@@ -84,7 +84,7 @@ function rowToMessage(row) {
 
 function rowToAttachment(row) {
   if (!row) return null;
-  return {
+  const out = {
     id: row.id,
     messageId: row.message_id,
     chatId: row.chat_id,
@@ -96,6 +96,10 @@ function rowToAttachment(row) {
     createdAt: row.created_at,
     url: `/api/attachments/${row.id}`
   };
+  if (row.extracted_text != null && String(row.extracted_text).length) {
+    out.extractedText = row.extracted_text;
+  }
+  return out;
 }
 
 function rowToChatSummary(row) {
@@ -185,11 +189,12 @@ export class LocalDatabase {
         id TEXT PRIMARY KEY,
         message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
         chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-        type TEXT NOT NULL CHECK (type IN ('image')),
+        type TEXT NOT NULL CHECK (type IN ('image', 'document')),
         mime_type TEXT NOT NULL,
         original_name TEXT NOT NULL,
         path TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
+        extracted_text TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -217,6 +222,38 @@ export class LocalDatabase {
       this.db.exec(
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_slug ON chats(slug) WHERE slug IS NOT NULL'
       );
+    }
+
+    const attachmentCols = this.db.prepare('PRAGMA table_info(message_attachments)').all();
+    const hasExtractedText = attachmentCols.some((column) => column.name === 'extracted_text');
+    if (!hasExtractedText) {
+      this.db.exec(`
+        PRAGMA foreign_keys=OFF;
+        BEGIN;
+        CREATE TABLE message_attachments_new (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          type TEXT NOT NULL CHECK (type IN ('image', 'document')),
+          mime_type TEXT NOT NULL,
+          original_name TEXT NOT NULL,
+          path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          extracted_text TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO message_attachments_new (
+          id, message_id, chat_id, type, mime_type, original_name, path, size_bytes, extracted_text, created_at
+        )
+        SELECT id, message_id, chat_id, type, mime_type, original_name, path, size_bytes, NULL, created_at
+        FROM message_attachments;
+        DROP TABLE message_attachments;
+        ALTER TABLE message_attachments_new RENAME TO message_attachments;
+        CREATE INDEX IF NOT EXISTS idx_message_attachments_message
+          ON message_attachments(message_id);
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+      `);
     }
 
     const slugless = this.db.prepare('SELECT id FROM chats WHERE slug IS NULL').all();
@@ -373,6 +410,7 @@ export class LocalDatabase {
           original_name,
           path,
           size_bytes,
+          extracted_text,
           created_at
         )
         VALUES (
@@ -384,6 +422,7 @@ export class LocalDatabase {
           @originalName,
           @path,
           @sizeBytes,
+          @extractedText,
           @createdAt
         )
       `),
@@ -604,7 +643,7 @@ export class LocalDatabase {
     };
   }
 
-  createAttachment({ chatId, messageId, type = 'image', mimeType, originalName, path: filePath, sizeBytes }) {
+  createAttachment({ chatId, messageId, type = 'image', mimeType, originalName, path: filePath, sizeBytes, extractedText = null }) {
     const attachment = {
       id: randomUUID(),
       messageId,
@@ -614,6 +653,7 @@ export class LocalDatabase {
       originalName,
       path: filePath,
       sizeBytes,
+      extractedText: extractedText == null ? null : String(extractedText),
       createdAt: this.now()
     };
     this.statements.insertAttachment.run(attachment);

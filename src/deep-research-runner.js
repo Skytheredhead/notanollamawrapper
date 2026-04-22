@@ -8,7 +8,9 @@ const SESSION_MS = 60 * 60 * 1000;
 const WARN_SEARCHES_PER_GOAL = 175;
 const HARD_STOP_SEARCHES_PER_GOAL = 200;
 const MAX_GOAL_TURNS = 400;
-const DR_NUM_CTX = 262144;
+// Extremely large context windows can destabilize some MLX models (or exhaust memory).
+// Keep this conservative; the runner can still do multiple goals/turns without needing 262k ctx.
+const DR_NUM_CTX = 65536;
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {

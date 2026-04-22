@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { pendingAttachmentKind } from './attachmentRules.js'
 
 function revokeMessageAttachmentUrls(messages = []) {
   for (const message of messages || []) {
@@ -22,6 +23,8 @@ const useStore = create(
       setUserName: (userName) => set({ userName }),
       showMetrics: true,
       setShowMetrics: (showMetrics) => set({ showMetrics }),
+      superMegaStats: false,
+      setSuperMegaStats: (superMegaStats) => set({ superMegaStats: Boolean(superMegaStats) }),
       webSearchEnabled: true,
       setWebSearchEnabled: (webSearchEnabled) => set({ webSearchEnabled }),
       searchStrategy: 'normal',
@@ -206,9 +209,10 @@ const useStore = create(
             ...Array.from(files || []).map((file) => ({
               id: `att${Date.now()}${Math.random().toString(36).slice(2)}`,
               file,
-              name: file.name || 'image',
-              mimeType: file.type || 'image/jpeg',
+              name: file.name || 'file',
+              mimeType: file.type || 'application/octet-stream',
               sizeBytes: file.size || 0,
+              kind: pendingAttachmentKind(file),
               previewUrl: URL.createObjectURL(file),
             })),
           ].slice(0, 8),
@@ -319,6 +323,7 @@ const useStore = create(
         userName: s.userName,
         selectedModel: s.selectedModel,
         showMetrics: s.showMetrics,
+        superMegaStats: s.superMegaStats,
         webSearchEnabled: s.webSearchEnabled,
         searchStrategy: s.searchStrategy,
         contextSize: s.contextSize,

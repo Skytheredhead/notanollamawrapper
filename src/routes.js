@@ -26,6 +26,12 @@ import {
   truncate
 } from './tool-registry.js';
 import { maybeAutoTitleChatFromFirstUserMessage } from './chat-title.js';
+import {
+  classifyUploadedFile,
+  extractDocumentText,
+  formatAttachmentContextBlock,
+  isImageMime
+} from './attachment-documents.js';
 
 function requireString(value, fallback = null) {
   if (typeof value !== 'string') return fallback;
@@ -108,28 +114,73 @@ function extensionForMime(mimeType) {
   return '.jpg';
 }
 
-async function saveUploadAttachment(part, config) {
-  const mimeType = String(part.mimetype || '').toLowerCase();
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
-    throw badRequest('unsupported_attachment', 'Only PNG, JPEG, and WebP images are supported.');
+const MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+async function saveUploadPart(part, config) {
+  const rawMime = String(part.mimetype || '').toLowerCase();
+  const rawFilename = part.filename || '';
+  const classified = classifyUploadedFile(rawMime, rawFilename);
+
+  if (classified.kind === 'unsupported') {
+    throw badRequest(
+      'unsupported_attachment',
+      `Unsupported file type for "${safeFilename(rawFilename)}". Use PNG, JPEG, or WebP images, or documents such as PDF, DOCX, spreadsheets (XLS, XLSX, ODS), JSON, CSV, or common plain-text and source files.`
+    );
   }
 
   await mkdir(config.attachmentsDir, { recursive: true });
-  const originalName = safeFilename(part.filename || `image${extensionForMime(mimeType)}`);
+
+  if (classified.kind === 'image') {
+    const mimeType = classified.normalizedMime;
+    if (!isImageMime(mimeType)) {
+      throw badRequest('unsupported_attachment', 'Only PNG, JPEG, and WebP images are supported.');
+    }
+    const originalName = safeFilename(rawFilename || `image${extensionForMime(mimeType)}`);
+    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${originalName}`;
+    const targetPath = path.join(config.attachmentsDir, fileName);
+    await pipeline(part.file, fs.createWriteStream(targetPath));
+    const size = (await stat(targetPath)).size;
+    if (size > 20 * 1024 * 1024) {
+      fs.rmSync(targetPath, { force: true });
+      throw badRequest('attachment_too_large', 'Images must be 20 MB or smaller.');
+    }
+    return {
+      type: 'image',
+      mimeType,
+      originalName,
+      path: targetPath,
+      sizeBytes: size
+    };
+  }
+
+  const originalName = safeFilename(rawFilename || 'attachment.txt');
   const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${originalName}`;
   const targetPath = path.join(config.attachmentsDir, fileName);
   await pipeline(part.file, fs.createWriteStream(targetPath));
   const size = (await stat(targetPath)).size;
-  if (size > 20 * 1024 * 1024) {
+  if (size > MAX_DOCUMENT_UPLOAD_BYTES) {
     fs.rmSync(targetPath, { force: true });
-    throw badRequest('attachment_too_large', 'Images must be 20 MB or smaller.');
+    throw badRequest('attachment_too_large', 'Documents must be 25 MB or smaller.');
+  }
+  let extractedText = '';
+  try {
+    extractedText = await extractDocumentText(targetPath, classified.normalizedMime, originalName);
+  } catch (error) {
+    fs.rmSync(targetPath, { force: true });
+    const detail = error instanceof Error ? error.message : 'unknown error';
+    throw badRequest('attachment_extract_failed', `Could not read "${originalName}": ${detail}`);
+  }
+  if (!String(extractedText || '').trim()) {
+    fs.rmSync(targetPath, { force: true });
+    throw badRequest('attachment_empty', `No readable text was found in "${originalName}".`);
   }
   return {
-    type: 'image',
-    mimeType,
+    type: 'document',
+    mimeType: classified.normalizedMime || 'application/octet-stream',
     originalName,
     path: targetPath,
-    sizeBytes: size
+    sizeBytes: size,
+    extractedText
   };
 }
 
@@ -152,7 +203,7 @@ async function bodyFromRequest(request, config) {
   try {
     for await (const part of request.parts()) {
       if (part.type === 'file') {
-        attachments.push(await saveUploadAttachment(part, config));
+        attachments.push(await saveUploadPart(part, config));
         continue;
       }
       if (part.fieldname === 'options') {
@@ -248,8 +299,17 @@ function trimModelHistoryForSpeed(messages = []) {
   });
 }
 
+function stripAppendedDocumentContext(text) {
+  const value = String(text || '');
+  const marker = '\n\n---\nAttached file (text):';
+  const index = value.indexOf(marker);
+  if (index === -1) return value;
+  return value.slice(0, index).trimEnd();
+}
+
 function latestUserQuery(messages) {
-  return [...messages].reverse().find((message) => message.role === 'user')?.content || '';
+  const last = [...messages].reverse().find((message) => message.role === 'user');
+  return stripAppendedDocumentContext(last?.content || '');
 }
 
 /** Last few user turns for the search classifier so follow-ups like "look it up" keep prior entities. */
@@ -372,26 +432,69 @@ function attachmentSignature(messages = []) {
   const parts = [];
   for (const message of messages) {
     for (const attachment of message.attachments || []) {
+      const docHash =
+        attachment.type === 'document'
+          ? hashPromptPart(String(attachment.extractedText || ''))
+          : '';
       parts.push([
         attachment.type || '',
         attachment.path || attachment.url || '',
         attachment.sizeBytes || attachment.size || '',
-        attachment.mimeType || ''
+        attachment.mimeType || '',
+        docHash
       ].join(':'));
     }
   }
   return parts.length ? hashPromptPart(parts.sort().join('|')) : 'none';
 }
 
-function promptCacheOptions({ chat, model, messages, enabled = true, branchId = 'main' } = {}) {
+function prepareMessagesForModel(messages = []) {
+  return messages.map((message) => {
+    const docs = (message.attachments || []).filter(
+      (attachment) => attachment && attachment.type === 'document' && String(attachment.extractedText || '').trim()
+    );
+    const docBlocks = docs
+      .map((attachment) => formatAttachmentContextBlock(attachment.name, attachment.extractedText))
+      .filter(Boolean);
+    let content = message.content || '';
+    if (docBlocks.length) {
+      content = [content, ...docBlocks].filter(Boolean).join('\n\n');
+    }
+    const imageAttachments = (message.attachments || []).filter((attachment) => attachment && attachment.type === 'image');
+    const next = {
+      ...message,
+      content
+    };
+    if (imageAttachments.length) next.attachments = imageAttachments;
+    else delete next.attachments;
+    return next;
+  });
+}
+
+function promptCacheOptions({
+  chat,
+  model,
+  messages,
+  enabled = true,
+  branchId = 'main',
+  attachmentSignatureOverride = null
+} = {}) {
   return {
     usePromptCache: Boolean(enabled),
     chatId: chat?.id || null,
     cacheBranchId: branchId || 'main',
     systemPromptHash: hashPromptPart(chat?.systemPrompt || ''),
-    attachmentSignature: attachmentSignature(messages),
+    attachmentSignature: attachmentSignatureOverride ?? attachmentSignature(messages),
     model
   };
+}
+
+function promptCacheEnabledForRequest({ backend, options } = {}) {
+  if (backend?.id !== 'mlx') return false;
+  const raw = options && typeof options === 'object' ? options.naow_disable_prompt_cache_warm : undefined;
+  if (raw === true) return false;
+  if (typeof raw === 'string' && ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())) return false;
+  return true;
 }
 
 function normalizeWarmMetrics(result, source = 'none') {
@@ -424,7 +527,18 @@ function logPromptCacheWarm(source, result) {
   });
 }
 
-async function warmPromptCache({ ollama, chat, model, messages, options, backend, branchId = 'main', source = 'none', signal } = {}) {
+async function warmPromptCache({
+  ollama,
+  chat,
+  model,
+  messages,
+  options,
+  backend,
+  branchId = 'main',
+  source = 'none',
+  signal,
+  attachmentSignatureOverride = null
+} = {}) {
   if (backend?.id !== 'mlx' || typeof ollama?.warmPromptCache !== 'function') {
     return {
       warmed: false,
@@ -432,7 +546,10 @@ async function warmPromptCache({ ollama, chat, model, messages, options, backend
       disabledReason: 'backend_unsupported'
     };
   }
-  const warmMessages = compactLeadingSystemMessages(trimModelHistoryForSpeed(messages));
+  const signature =
+    attachmentSignatureOverride ?? attachmentSignature(messages);
+  const prepared = prepareMessagesForModel(messages);
+  const warmMessages = compactLeadingSystemMessages(trimModelHistoryForSpeed(prepared));
   const result = await ollama.warmPromptCache({
     model,
     messages: warmMessages,
@@ -442,8 +559,9 @@ async function warmPromptCache({ ollama, chat, model, messages, options, backend
       chat,
       model,
       messages: warmMessages,
-      enabled: true,
-      branchId
+      enabled: promptCacheEnabledForRequest({ backend, options }),
+      branchId,
+      attachmentSignatureOverride: signature
     }),
     signal
   });
@@ -452,7 +570,8 @@ async function warmPromptCache({ ollama, chat, model, messages, options, backend
 }
 
 function scheduleCanonicalPromptWarm({ db, ollama, chatId, model, options, backend, branchId = 'main' } = {}) {
-  if (backend?.id !== 'mlx' || typeof ollama?.warmPromptCache !== 'function') return;
+  if (!promptCacheEnabledForRequest({ backend, options })) return;
+  if (typeof ollama?.warmPromptCache !== 'function') return;
   setTimeout(async () => {
     try {
       const latestChat = db.getChat(chatId);
@@ -868,6 +987,8 @@ async function streamAssistantReply({
     toolsOptions.enabled = Boolean(config.toolsEnabled && toolsOptions.enabled);
 
     const query = latestUserQuery(messages).trim();
+    const attachmentSignatureForCache = attachmentSignature(messages);
+    messages = prepareMessagesForModel(messages);
     const shouldPlanWithTools = Boolean(
       toolsOptions.enabled &&
       backend.id === 'ollama' &&
@@ -927,7 +1048,8 @@ async function streamAssistantReply({
           backend,
           branchId: 'main',
           source: 'search_overlap',
-          signal: entry.abortController.signal
+          signal: entry.abortController.signal,
+          attachmentSignatureOverride: attachmentSignatureForCache
         }).catch((error) => ({
           warmed: false,
           enabled: false,
@@ -1213,8 +1335,9 @@ async function streamAssistantReply({
         chat,
         model,
         messages: modelMessages,
-        enabled: backend.id === 'mlx',
-        branchId: 'main'
+        enabled: promptCacheEnabledForRequest({ backend, options }),
+        branchId: 'main',
+        attachmentSignatureOverride: attachmentSignatureForCache
       }),
       signal: entry.abortController.signal
     })) {
@@ -1784,6 +1907,26 @@ export function registerRoutes(app, {
       const topic = requireString(body.topic);
       if (!topic) throw badRequest('missing_topic', 'Topic is required.');
       if (!searchClient) throw unavailable('search_unavailable', 'Search is not configured for deep research.');
+      // Deep research depends on local search. If search isn't ready, fail fast with an actionable
+      // error instead of starting a long-running job that will just backoff forever.
+      if (typeof searchClient.status === 'function') {
+        let status = await searchClient.status();
+        if (!status?.ready && typeof searchClient.start === 'function') {
+          try {
+            await searchClient.start();
+          } catch {
+            // ignore: we'll re-check status and return a user-facing message below
+          }
+          status = await searchClient.status();
+        }
+        if (!status?.ready) {
+          throw unavailable(
+            'search_unavailable',
+            `Local search is not ready. ${status?.message || 'Start local search from Settings → Search.'}`,
+            status
+          );
+        }
+      }
       const r = await deepResearchManager.start({
         chatId: chat.id,
         topic,

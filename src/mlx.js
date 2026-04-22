@@ -407,10 +407,31 @@ export class HybridModelClient {
   }
 
   async *streamChat(request) {
-    const hasImages = request.messages?.some((message) => message.attachments?.length);
+    const hasImages = request.messages?.some((message) =>
+      (message.attachments || []).some((attachment) => attachment?.type === 'image')
+    );
     if (hasImages || this.mlx.isMlxModel(request.model)) {
-      yield* this.mlx.streamChat(request);
-      return;
+      try {
+        yield* this.mlx.streamChat(request);
+        return;
+      } catch (error) {
+        // Some large/experimental MLX models can hard-fail in the runner (HTTP 500).
+        // If that happens, automatically fall back to the default MLX model so the
+        // backend doesn't "crash" a chat session.
+        const requested = String(request?.model || '');
+        const fallback = String(this.mlx?.modelName || '');
+        const canFallback = requested && fallback && requested !== fallback;
+        if (!canFallback) throw error;
+        yield* this.mlx.streamChat({
+          ...request,
+          model: fallback,
+          options: {
+            ...(request.options || {}),
+            fallbackFrom: requested
+          }
+        });
+        return;
+      }
     }
 
     let yielded = false;

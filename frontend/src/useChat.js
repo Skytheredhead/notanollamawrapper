@@ -278,7 +278,7 @@ export function useChat() {
       content,
       attachments: requestedAttachments.map((attachment) => ({
         id: attachment.id,
-        type: 'image',
+        type: attachment.kind === 'image' ? 'image' : 'document',
         mimeType: attachment.mimeType,
         name: attachment.name,
         sizeBytes: attachment.sizeBytes,

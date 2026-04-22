@@ -3,6 +3,8 @@ import adapter from './adapter'
 import MessageContent from './components/MessageContent'
 import useStore from './store'
 import { useChat } from './useChat'
+import TestPage from './TestPage'
+import { ATTACHMENT_INPUT_ACCEPT, validateAttachmentFile } from './attachmentRules.js'
 
 const THEMES = [
   ['minimal', 'Minimal'],
@@ -46,10 +48,10 @@ const EMPTY_PROMPTS = [
   ['Ready when you are.', 'Start anywhere.'],
 ]
 
-const STATS_REFRESH_MS = 650
-const IDLE_STATS_REFRESH_MS = 5000
+const STATS_REFRESH_MS = 1000
+const IDLE_STATS_REFRESH_MS = 1000
 const INACTIVE_STATS_REFRESH_MS = 60000
-const CPU_DISPLAY_REFRESH_MS = 2500
+const CPU_DISPLAY_REFRESH_MS = 1000
 
 function orderChats(chats) {
   const isEmptyNew = (chat) => {
@@ -251,6 +253,61 @@ function IconQueueComposer() {
       <path d="M5 8h10M5 12h10M5 16h6" />
       <path d="M17 14v5M14.5 16.5H19" />
     </svg>
+  )
+}
+
+function truncateForMegaDump(text, max) {
+  const s = String(text ?? '')
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}…[truncated; ${s.length} chars total]`
+}
+
+function buildMessageStatDump(message) {
+  if (!message || typeof message !== 'object') return { message }
+  const { content, ...rest } = message
+  return {
+    ...rest,
+    _contentLength: typeof content === 'string' ? content.length : null,
+    _contentPreview: typeof content === 'string' ? truncateForMegaDump(content, 8000) : content,
+  }
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(
+      value,
+      (_, v) => (v === undefined ? '[undefined]' : v),
+      2
+    )
+  } catch (e) {
+    return JSON.stringify(
+      {
+        stringifyError: e instanceof Error ? e.message : String(e),
+        topLevelKeys: value && typeof value === 'object' ? Object.keys(value) : [],
+      },
+      null,
+      2
+    )
+  }
+}
+
+function SuperMegaStatsBlock({ message, streaming, streamMetrics, streamToolCards, streamSearchStatus }) {
+  const superMegaStats = useStore((s) => s.superMegaStats)
+  if (!superMegaStats) return null
+  const payload = streaming
+    ? {
+        mode: 'streaming',
+        streamSearchStatus: streamSearchStatus ?? null,
+        streamToolCards: streamToolCards ?? [],
+        streamMetrics: streamMetrics ?? null,
+      }
+    : buildMessageStatDump(message)
+  const text = safeJsonStringify(payload)
+  return (
+    <details className="superMegaStats">
+      <summary className="superMegaStatsSummary">Super mega stats (full JSON)</summary>
+      <pre className="superMegaStatsPre" tabIndex={0}>{text}</pre>
+    </details>
   )
 }
 
@@ -2109,6 +2166,8 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, cur
   const setUserName = useStore((s) => s.setUserName)
   const showMetrics = useStore((s) => s.showMetrics)
   const setShowMetrics = useStore((s) => s.setShowMetrics)
+  const superMegaStats = useStore((s) => s.superMegaStats)
+  const setSuperMegaStats = useStore((s) => s.setSuperMegaStats)
   const webSearchEnabled = useStore((s) => s.webSearchEnabled)
   const setWebSearchEnabled = useStore((s) => s.setWebSearchEnabled)
   const searchStrategy = useStore((s) => s.searchStrategy)
@@ -2297,6 +2356,14 @@ function Settings({ models, selectedModel, setSelectedModel, onUnloadModels, cur
             <span>Show token timing</span>
           </label>
           <label className="checkRow">
+            <input type="checkbox" checked={superMegaStats} onChange={(e) => setSuperMegaStats(e.target.checked)} />
+            <span className="customCheck" aria-hidden="true" />
+            <span>Super mega stats</span>
+          </label>
+          {superMegaStats && (
+            <small className="settingsHint">Expands a raw JSON dump under every message (ids, metadata, metrics, tool cards, timing fields). Large message bodies are preview-truncated.</small>
+          )}
+          <label className="checkRow">
             <input type="checkbox" checked={webSearchEnabled} onChange={(e) => setWebSearchEnabled(e.target.checked)} />
             <span className="customCheck" aria-hidden="true" />
             <span>Allow web search</span>
@@ -2398,7 +2465,10 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
         {messages.map((message) => (
           <section key={message.id} className={`message ${message.role} ${message.status === 'error' ? 'isError' : ''}`}>
             {message.role === 'user' ? (
-              <UserMessageBubble message={message} onEditUserMessage={onEditUserMessage} />
+              <>
+                <UserMessageBubble message={message} onEditUserMessage={onEditUserMessage} />
+                <SuperMegaStatsBlock message={message} />
+              </>
             ) : (
               <>
                 <AttachmentStrip attachments={message.attachments} />
@@ -2407,6 +2477,7 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
                   <MessageMetrics metrics={message.metrics} now={now} />
                   <MessageActions message={message} onRegenerate={onRegenerate} />
                 </div>
+                <SuperMegaStatsBlock message={message} />
               </>
             )}
           </section>
@@ -2417,7 +2488,15 @@ function ChatCard({ chatId, active, messages, streamingContent, streamMetrics, s
               ? <SearchingPlaceholder status={streamSearchStatus} />
               : <AssistantMessageBody message={{ createdAt: new Date().toISOString(), content: streamingContent || ' ' }} toolCards={streamToolCards} now={wallNow} content={streamingContent || ' '} />}
             {!((streamSearchStatus?.phase === 'searching' || streamSearchStatus?.phase === 'finding_weather') && !streamingContent) && (
-              <MessageMetrics metrics={streamMetrics} now={now} streaming />
+              <>
+                <MessageMetrics metrics={streamMetrics} now={now} streaming />
+                <SuperMegaStatsBlock
+                  streaming
+                  streamMetrics={streamMetrics}
+                  streamToolCards={streamToolCards}
+                  streamSearchStatus={streamSearchStatus}
+                />
+              </>
             )}
           </section>
         )}
@@ -2668,6 +2747,11 @@ export default function App() {
       try {
         await loadModels()
         const loaded = await loadChats()
+        const onTestPage = typeof window !== 'undefined' && window.location.pathname.startsWith('/test')
+        if (onTestPage) {
+          // Don't auto-create/select a chat on /test, because that rewrites the URL to /chat/:slug.
+          return
+        }
         const pathMatch = typeof window !== 'undefined' && window.location.pathname.match(/^\/chat\/([a-z]{5})\/?$/)
         if (pathMatch) {
           await selectChat(pathMatch[1])
@@ -2739,6 +2823,9 @@ export default function App() {
                 useStore.getState().setDeepResearchDoneToast({ slug: chat.slug, topic: st.topic || 'Deep research' })
               }
             }
+          }
+          if (phase === 'error' && st?.error) {
+            setError(`Deep research failed: ${st.error}`)
           }
           drPrevPhaseRef.current[id] = phase
           if (['complete', 'stopped', 'error'].includes(phase)) {
@@ -2905,17 +2992,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const isAllowed = (file) => {
-      if (!file) return false
-      if (file.size > 100 * 1024 * 1024) return false
-      const name = String(file.name || '')
-      const extOk = /\.(txt|md|json|ya?ml|toml|ini|env|js|jsx|ts|tsx|py|go|rs|java|c|cc|cpp|h|hpp|css|html|sh|bash|zsh|xml|csv|tsv|log)$/i.test(name)
-      const typeOk = String(file.type || '').startsWith('text/')
-        || String(file.type || '').startsWith('image/')
-        || String(file.type || '').includes('json')
-      return extOk || typeOk
-    }
-
     const hasFiles = (dt) => Array.from(dt?.types || []).includes('Files')
     const onDragEnter = (e) => {
       if (!hasFiles(e.dataTransfer)) return
@@ -2938,8 +3014,16 @@ export default function App() {
       e.preventDefault()
       globalDropDepthRef.current = 0
       setGlobalDropActive(false)
-      const files = Array.from(e.dataTransfer?.files || []).filter(isAllowed)
-      if (files.length) addPendingAttachments(files)
+      const list = Array.from(e.dataTransfer?.files || [])
+      const allowed = []
+      let firstReject = ''
+      for (const file of list) {
+        const v = validateAttachmentFile(file)
+        if (v.ok) allowed.push(file)
+        else if (!firstReject) firstReject = v.reason || ''
+      }
+      if (firstReject) setError(firstReject)
+      if (allowed.length) addPendingAttachments(allowed)
     }
 
     window.addEventListener('dragenter', onDragEnter)
@@ -2952,7 +3036,7 @@ export default function App() {
       window.removeEventListener('dragleave', onDragLeave)
       window.removeEventListener('drop', onDrop)
     }
-  }, [addPendingAttachments])
+  }, [addPendingAttachments, setError])
 
   useEffect(() => {
     const onPaletteShortcut = (event) => {
@@ -3059,6 +3143,8 @@ export default function App() {
     ? 'Deep research'
     : (isStreaming ? (hasDraft ? 'Queue' : 'Send') : 'Send')
 
+  const isTestRoute = typeof window !== 'undefined' && window.location.pathname.startsWith('/test')
+
   const handleComposerAction = async () => {
     if (composerMode === 'deep_research') {
       const ok = await startDeepResearch(input)
@@ -3072,18 +3158,16 @@ export default function App() {
   }
 
   const addFiles = (files) => {
-    const isAllowed = (file) => {
-      if (!file) return false
-      if (file.size > 100 * 1024 * 1024) return false
-      const name = String(file.name || '')
-      const extOk = /\.(txt|md|json|ya?ml|toml|ini|env|js|jsx|ts|tsx|py|go|rs|java|c|cc|cpp|h|hpp|css|html|sh|bash|zsh|xml|csv|tsv|log)$/i.test(name)
-      const typeOk = String(file.type || '').startsWith('text/')
-        || String(file.type || '').startsWith('image/')
-        || String(file.type || '').includes('json')
-      return extOk || typeOk
+    const list = Array.from(files || [])
+    const allowed = []
+    let firstReject = ''
+    for (const file of list) {
+      const v = validateAttachmentFile(file)
+      if (v.ok) allowed.push(file)
+      else if (!firstReject) firstReject = v.reason || ''
     }
-    const next = Array.from(files || []).filter(isAllowed)
-    if (next.length) addPendingAttachments(next)
+    if (firstReject) setError(firstReject)
+    if (allowed.length) addPendingAttachments(allowed)
   }
 
   return (
@@ -3127,25 +3211,33 @@ export default function App() {
       </header>
       <ModelDownloadToast />
 
-      <main className="stage">
-        <div className="chatViewport">
-          <ChatCard
-            chatId={currentChat?.id || currentChatId}
-            active
-            messages={messages}
-            streamingContent={streamingContent}
-            streamMetrics={streamMetrics}
-            streamSearchStatus={streamSearchStatus}
-            streamToolCards={streamToolCards}
-            isStreaming={isStreaming}
-            now={now}
-            wallNow={wallNow}
-            userName={userName}
-            onRegenerate={regenerate}
-            onEditUserMessage={editUserMessage}
-          />
-        </div>
-      </main>
+      {isTestRoute ? (
+        <main className="stage">
+          <div className="chatViewport testViewport">
+            <TestPage />
+          </div>
+        </main>
+      ) : (
+        <>
+        <main className="stage">
+          <div className="chatViewport">
+            <ChatCard
+              chatId={currentChat?.id || currentChatId}
+              active
+              messages={messages}
+              streamingContent={streamingContent}
+              streamMetrics={streamMetrics}
+              streamSearchStatus={streamSearchStatus}
+              streamToolCards={streamToolCards}
+              isStreaming={isStreaming}
+              now={now}
+              wallNow={wallNow}
+              userName={userName}
+              onRegenerate={regenerate}
+              onEditUserMessage={editUserMessage}
+            />
+          </div>
+        </main>
 
       <footer className="composer">
         {currentQueue.length > 0 && (
@@ -3199,7 +3291,7 @@ export default function App() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="text/*,application/json,application/x-yaml,.md,.txt,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cc,.cpp,.h,.hpp,.css,.html,.sh,.bash,.zsh,.yaml,.yml,.toml,.ini,.env,image/*"
+          accept={ATTACHMENT_INPUT_ACCEPT}
           multiple
           hidden
           onChange={(event) => {
@@ -3216,6 +3308,7 @@ export default function App() {
           onDragLeave={(event) => event.currentTarget.classList.remove('isDropping')}
           onDrop={(event) => {
             event.preventDefault()
+            event.stopPropagation()
             event.currentTarget.classList.remove('isDropping')
             addFiles(event.dataTransfer.files)
           }}
@@ -3279,6 +3372,8 @@ export default function App() {
         chats={orderedChats}
         onSelectChat={selectChat}
       />
+        </>
+      )}
     </div>
   )
 }

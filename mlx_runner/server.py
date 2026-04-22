@@ -115,19 +115,46 @@ def _ensure_mlx_preflight() -> None:
 
 def _load_model_objects(spec: ModelSpec) -> dict[str, Any]:
     if spec.backend == "vlm":
-        from mlx_vlm import VisionFeatureCache, load
+        try:
+            from mlx_vlm import VisionFeatureCache, load
 
-        model, processor = load(str(spec.path))
-        return {
-            "modelName": spec.name,
-            "backend": spec.backend,
-            "pinned": spec.pinned,
-            "model": model,
-            "processor": processor,
-            "visionCache": VisionFeatureCache(),
-            "promptCaches": {},
-            "generationLock": threading.RLock(),
-        }
+            model, processor = load(str(spec.path))
+            return {
+                "modelName": spec.name,
+                "backend": spec.backend,
+                "pinned": spec.pinned,
+                "model": model,
+                "processor": processor,
+                "visionCache": VisionFeatureCache(),
+                "promptCaches": {},
+                "generationLock": threading.RLock(),
+            }
+        except Exception as exc:
+            # Some Gemma4 "VLM" repos ship only the text tower (language_model.*) without the
+            # vision tower weights. mlx_vlm.load then fails with "Missing ... parameters" for
+            # vision_tower.*. In that case, fall back to mlx_lm so users can still run it as a
+            # text-only model.
+            msg = str(exc)
+            looks_like_missing_vision = (
+                "Missing" in msg
+                and ("vision_tower." in msg or "embed_vision." in msg or "image_token" in msg)
+            )
+            if not looks_like_missing_vision:
+                raise
+
+            from mlx_lm import load as lm_load
+
+            model, tokenizer = lm_load(str(spec.path))
+            return {
+                "modelName": spec.name,
+                "backend": "lm",
+                "pinned": spec.pinned,
+                "model": model,
+                "tokenizer": tokenizer,
+                "promptCaches": {},
+                "generationLock": threading.RLock(),
+                "note": "vlm_load_failed_fell_back_to_lm",
+            }
 
     from mlx_lm import load
 
@@ -152,7 +179,24 @@ def _load_runtime(model_name: str | None = None) -> dict[str, Any]:
     with _runtime_lock:
         loaded = _runtime["loaded"]
         if spec.name not in loaded:
-            loaded[spec.name] = _load_model_objects(spec)
+            try:
+                loaded[spec.name] = _load_model_objects(spec)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                # Surface a readable error to the client instead of returning a bare 500.
+                # This is especially helpful for large VLM models that can fail to load due to
+                # missing/unsupported ops, memory pressure, or incompatible mlx/mlx-vlm versions.
+                print(f"MLX model load failed for {spec.name}: {exc}", file=sys.stderr, flush=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "model_load_failed",
+                        "model": spec.name,
+                        "backend": spec.backend,
+                        "message": str(exc),
+                    },
+                )
         _runtime["lastActiveAt"] = time.monotonic()
         return loaded[spec.name]
 
